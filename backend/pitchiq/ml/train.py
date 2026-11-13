@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import logging
+from datetime import datetime, timezone
 from typing import Callable
 
 import pandas as pd
@@ -16,7 +17,7 @@ from ..features.schema import FEATURE_VERSION, schema_dict
 from ..features.store import get_classes, load_feature_frame
 from ..logging_setup import log
 from ..models import ModelRegistry
-from . import registry
+from . import registry, tracking
 from .metrics import summarize
 from .models import FAMILIES, FrequencyBaseline
 
@@ -40,6 +41,7 @@ def fingerprint(df: pd.DataFrame) -> dict:
 def train_family(session: Session, pitcher_id: int, family: str, features: list[str] | None = None,
                  tag: str = "", grid: list[dict] | None = None, progress: Callable | None = None,
                  extra_config: dict | None = None) -> ModelRegistry:
+    started_at = datetime.now(timezone.utc)
     classes = get_classes(session, pitcher_id)
     df = load_feature_frame(session, pitcher_id, ["train", "validation"])
     tr, va = df[df.split == "train"], df[df.split == "validation"]
@@ -70,6 +72,9 @@ def train_family(session: Session, pitcher_id: int, family: str, features: list[
         status="candidate",
     )
     session.add(entry)
+    session.flush()
+    # Optional MLflow mirror (no-op if disabled / not installed); the run id is written back into entry.config.
+    tracking.mirror_model_entry(entry, started_at=started_at)
     session.flush()
     log(logger, "model_trained", version=version, val_log_loss=val_metrics["log_loss"],
         val_top1=val_metrics["top1_accuracy"], temperature=calib["temperature"])

@@ -16,6 +16,10 @@ os.environ.setdefault("PITCHIQ_DATABASE_URL", "postgresql+psycopg://pitchiq:pitc
 os.environ["PITCHIQ_ARTIFACT_DIR"] = str(TMP / "artifacts")
 os.environ["PITCHIQ_DATA_DIR"] = str(TMP / "data")
 os.environ["PITCHIQ_HTTP_MIN_INTERVAL_S"] = "0"
+# MLflow mirror goes to a throwaway store for the test session (never backend/mlruns).
+os.environ["PITCHIQ_MLFLOW_ENABLED"] = "true"
+os.environ["PITCHIQ_MLFLOW_TRACKING_URI"] = f"sqlite:///{TMP / 'mlruns' / 'mlflow.db'}"
+os.environ["PITCHIQ_MLFLOW_ARTIFACT_ROOT"] = str(TMP / "mlruns" / "artifacts")
 
 import pandas as pd  # noqa: E402
 from sqlalchemy import text  # noqa: E402

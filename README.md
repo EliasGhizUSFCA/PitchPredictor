@@ -63,6 +63,7 @@ cd backend && createdb pitchiq_test && python -m pytest -q
 | Video | `pitchiq/video/` | Provider adapters → metadata matcher with confidence levels → `video_assets`, coverage reporting, availability checks, review queue. |
 | Challenge | `pitchiq/challenge.py` | Seeded sampling from the locked test split; the prediction is frozen before anything about the outcome is read; reveal and live scoring with baselines on the same pitches. |
 | Jobs | `pitchiq/jobs/` | Postgres-backed queue (`FOR UPDATE SKIP LOCKED`) with progress, logs, cancellation, and safe retry. All tasks are idempotent. |
+| Experiment tracking | `ml/tracking.py` | Optional MLflow mirror of `model_registry` and `evaluation_runs` (Postgres stays the source of truth). One experiment per pitcher, one run per trained model and per evaluation row, promoted model registered with alias `promoted`. No-op when disabled or when mlflow is not installed; mirror errors are logged, never raised. |
 | Observability | `pitchiq/trace.py` | Each inference records its real stages (timings, inputs, outputs, warnings) to `pipeline_traces`. |
 | API | `pitchiq/api/` | FastAPI: pitchers/analytics, blind replay, simulator (predict, compare, sweep, saved scenarios), models/leaderboard/compare, challenges, videos, jobs, traces. |
 
@@ -152,6 +153,51 @@ How to read these numbers:
 Because the test split has now been viewed twice, the 2026 numbers are slightly optimistic for logreg. A clean
 confirmation needs a new untouched partition, for example the 2027 season.
 
+## Experiment tracking (MLflow mirror)
+
+Postgres is the record: `model_registry` holds grid results, dataset fingerprints, calibration and the artifact
+checksum, and `evaluation_runs` holds every report. `pitchiq/ml/tracking.py` mirrors these rows into MLflow so runs can
+be compared in the MLflow UI. Nothing read from MLflow feeds back into training, selection, calibration or promotion.
+
+* **What gets logged.** `train_family` logs one run per trained model. The run gets hyperparameters (`hp.*`), feature
+  count, train/validation sizes and pitch-uid hashes (also logged as MLflow dataset inputs), validation metrics, the
+  calibration temperature, and a `grid_val_log_loss` / `grid_val_top1` history with one step per grid point. Its
+  artifacts are `grid_results.json`, `features.json`, `feature_schema.json`, `dataset_fingerprint.json`,
+  `config.json` and `calibration.json`, plus the joblib file under `model/` after re-checking its SHA-256. Tags:
+  `pitchiq.model_version`, `family`, `feature_version`, `status`, `split_policy`, `artifact_sha256`.
+  `holdout_benchmark`, `walk_forward` and `ablation` log one run per `evaluation_runs` row. Those runs get
+  `<split>_*` summary metrics, Wilson and game-bootstrap CIs, ECE, uncalibrated metrics, and per-config ablation
+  deltas (`ablation/<config>/delta_log_loss`). The confusion matrix, calibration curves, breakdowns, bootstrap and
+  distributions are stored as JSON artifacts. Tags: `pitchiq.evaluation_run_id`, `model_version`, `model_run_id`.
+* **Run ids in Postgres.** Run ids are written back to `model_registry.config["mlflow_run_id"]` and
+  `evaluation_runs.metrics["mlflow_run_id"]`. These are JSONB keys, not new columns: the mirror is optional, nothing
+  queries or joins on the id, and Postgres must stay complete without MLflow. The API returns the ids on model views,
+  evaluation views, the leaderboard (`mlflow_run_id`, `model_mlflow_run_id`), and `GET /api/tracking`.
+* **Model registry.** The promoted model is registered as `pitchiq-<pitcher_id>`, and the alias `promoted` follows
+  `registry.promote`. Status tags on the training runs are updated when promotion changes.
+* **Store.** The default is `sqlite:///backend/mlruns/mlflow.db` with artifacts in `backend/mlruns/artifacts`
+  (gitignored). MLflow 3 puts the plain `./mlruns` file store in maintenance mode and refuses to open it unless
+  `MLFLOW_ALLOW_FILE_STORE=true`, so the default is a local SQLite store in the same folder. SQLite also supports the
+  model registry. Settings: `PITCHIQ_MLFLOW_ENABLED` (default `true`), `PITCHIQ_MLFLOW_TRACKING_URI`,
+  `PITCHIQ_MLFLOW_ARTIFACT_ROOT`, `PITCHIQ_MLFLOW_EXPERIMENT_PREFIX`, `PITCHIQ_MLFLOW_LOG_MODEL_ARTIFACTS`,
+  `PITCHIQ_MLFLOW_REGISTER_MODELS`. Install the dependency with `pip install -e ".[tracking]"`.
+* **Backfill.** `pitchiq mlflow-backfill` (also the `mlflow_backfill` job) mirrors every existing row, archived ones
+  included. Backfilled runs keep the row's original `created_at` as their start time and are tagged
+  `pitchiq.backfilled=true`. Re-running only refreshes status tags: a run id that already exists in the store is
+  reused, and a run that was created but never linked is found by tag and re-linked.
+  On the real database it created **8 training runs** (4 archived, 3 candidate, 1 promoted) and **13 evaluation
+  runs** (8 holdout benchmarks, 3 walk-forward, 2 ablations). It registered `519242-lightgbm-v1-20261113T205951` as
+  `pitchiq-519242` version 1 with alias `promoted`. An immediate second run created 0 and reported 8 + 13 already
+  mirrored. The store takes about 4 MB.
+
+```bash
+pitchiq mlflow-backfill
+```
+
+```bash
+mlflow ui --backend-store-uri sqlite:///backend/mlruns/mlflow.db   # from the repo root, or from anywhere: pitchiq mlflow-ui
+```
+
 ## Video access (what is and is not done)
 
 * **How discovery works:** for every game, the official **MLB Stats API live feed** supplies each pitch's Statcast `playId`.
@@ -181,8 +227,14 @@ confirmation needs a new untouched partition, for example the 2027 season.
   ablation shows the sequence features already carry most of the signal.
 * **LLM explanations:** not implemented. The narrative endpoint is a deterministic template over stored attribution values,
   and it never produces probabilities.
-* **Experiment tracking** lives in Postgres (`model_registry`, `evaluation_runs` with dataset fingerprints and grid results)
-  rather than MLflow.
+* **MLflow mirror:** MLflow is a one-way mirror. Editing or deleting runs in MLflow changes nothing in PitchIQ. A run is
+  written after the Postgres row is flushed but before it commits, so a rolled-back transaction can leave an orphan
+  run; `mlflow-backfill` tags those `pitchiq.orphaned=true` (runs younger than `--orphan-grace-s`, default 1 h, are
+  skipped because their transaction may still be open). For backfilled runs, the `pitchiq.split_policy` tag records the
+  split configuration at backfill time. It is marked as such because the season split is not stored per row. The
+  registered model version points at the joblib file inside the run. It is not an MLflow "flavor", so
+  `mlflow.pyfunc.load_model` cannot load it; load it with `pitchiq.ml.registry`. The Docker image does not install
+  the `tracking` extra, so tracking is a no-op there unless you add it.
 * **Simulator assumptions:** pitcher history is taken as of a chosen date. Missing previous-pitch velocity is imputed with that
   pitch type's historical mean. If the pitch count is above 0 and no previous pitch is entered, the output averages the
   model over the training distribution of previous pitch and result for that count; the response says so. Simulator

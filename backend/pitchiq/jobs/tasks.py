@@ -74,6 +74,11 @@ def t_ablation(session, params, ctx):
     return {"evaluation_run_id": r.evaluation_run_id, "results": r.metrics["results"]}
 
 
+def t_mlflow_backfill(session, params, ctx):
+    from ..ml.tracking import get_tracker
+    return get_tracker().backfill(session, params.get("pitcher_id"))
+
+
 def t_full_refresh(session, params, ctx):
     out = {}
     steps = [("ingest_statcast", t_ingest_statcast), ("ingest_feeds", t_ingest_feeds), ("validate", t_validate),
@@ -100,6 +105,7 @@ TASKS = {
     "walk_forward": t_walk_forward,
     "ablation": t_ablation,
     "full_refresh": t_full_refresh,
+    "mlflow_backfill": t_mlflow_backfill,
 }
 
 DESCRIPTIONS = {
@@ -114,4 +120,5 @@ DESCRIPTIONS = {
     "walk_forward": "Walk-forward expanding-window evaluation",
     "ablation": "Feature-group ablation on validation",
     "full_refresh": "Ingest -> feeds -> validate -> features -> video library",
+    "mlflow_backfill": "Mirror model registry + evaluation runs into MLflow (Postgres stays the source of truth)",
 }

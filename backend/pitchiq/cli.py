@@ -41,6 +41,12 @@ def main(argv=None):
     a.add_argument("--family", default="lightgbm")
     pr = sub.add_parser("promote")
     pr.add_argument("model_version")
+    mb = sub.add_parser("mlflow-backfill", help="Mirror model_registry + evaluation_runs (archived included) into MLflow")
+    mb.add_argument("--orphan-grace-s", type=float, default=3600.0,
+                    help="skip orphan tagging for runs newer than this (their transaction may still be open)")
+    mu = sub.add_parser("mlflow-ui", help="Start the MLflow UI on the configured tracking store")
+    mu.add_argument("--port", type=int, default=5000)
+    mu.add_argument("--host", default="127.0.0.1")
     sub.add_parser("bootstrap", help="Full pipeline: migrate, ingest, feeds, validate, features, videos, train, benchmark")
     sub.add_parser("worker", help="Run the background job worker")
     sv = sub.add_parser("serve")
@@ -67,6 +73,14 @@ def main(argv=None):
     if args.cmd == "serve":
         import uvicorn
         return uvicorn.run("pitchiq.api.main:app", host=args.host, port=args.port)
+    if args.cmd == "mlflow-ui":
+        import os
+        import shutil
+        uri = get_settings().mlflow_uri
+        exe = shutil.which("mlflow")
+        if exe is None:
+            raise SystemExit("mlflow is not installed (pip install -e '.[tracking]')")
+        os.execv(exe, [exe, "ui", "--backend-store-uri", uri, "--host", args.host, "--port", str(args.port)])
     if args.cmd == "bootstrap":
         for c in (["init-db"], ["ingest"], ["feeds"], ["validate"], ["features"], ["videos"], ["train"],
                   ["benchmark"], ["walk-forward"], ["ablation"]):
@@ -112,6 +126,9 @@ def main(argv=None):
         elif args.cmd == "ablation":
             from .ml.evaluate import ablation
             out(ablation(s, pid, args.family).metrics)
+        elif args.cmd == "mlflow-backfill":
+            from .ml.tracking import get_tracker
+            out(get_tracker().backfill(s, args.pitcher, orphan_grace_s=args.orphan_grace_s))
         elif args.cmd == "promote":
             from .ml.registry import promote
             promote(s, args.model_version)

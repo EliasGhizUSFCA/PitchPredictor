@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 explain = ["shap>=0.45"]
+tracking = ["mlflow>=3.0"]
 dev = ["pytest>=8", "httpx>=0.27"]
 
 [project.scripts]

@@ -16,7 +16,7 @@ from ..features.schema import FEATURE_GROUPS, feature_list
 from ..features.store import get_classes, load_feature_frame
 from ..logging_setup import log
 from ..models import EvaluationRun, ModelRegistry, PitchPrediction
-from . import registry
+from . import registry, tracking
 from .metrics import breakdowns, cluster_bootstrap, confusion, reliability, summarize
 from .models import FAMILIES
 
@@ -85,6 +85,8 @@ def holdout_benchmark(session: Session, pitcher_id: int, model_version: str | No
                              is_correct_top1=top == df.label.iloc[i], prob_actual=probs[df.label.iloc[i]]))
         for i in range(0, len(rows), 1000):
             session.execute(insert(PitchPrediction).values(rows[i:i + 1000]))
+    tracking.mirror_evaluation(run, entry)
+    session.flush()
     log(logger, "benchmark", version=entry.model_version, split=split, **report["summary"])
     return run
 
@@ -139,6 +141,8 @@ def walk_forward(session: Session, pitcher_id: int, family: str = "lightgbm", sp
                                             "hyperparameters": "frozen from registered model"})
     session.add(run)
     session.flush()
+    tracking.mirror_evaluation(run, entry)
+    session.flush()
     return run
 
 
@@ -178,6 +182,8 @@ def ablation(session: Session, pitcher_id: int, family: str = "lightgbm", progre
                         "Uncalibrated validation metrics; positive delta_log_loss means the group helps."},
                         dataset_definition={"train": "train", "score": "validation"})
     session.add(run)
+    session.flush()
+    tracking.mirror_evaluation(run, entry)
     session.flush()
     return run
 

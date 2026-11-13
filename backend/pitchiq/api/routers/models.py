@@ -23,7 +23,7 @@ def _entry_view(e: ModelRegistry, full: bool = False) -> dict:
          "validation_metrics": e.validation_metrics, "calibration": e.calibration,
          "n_features": len(e.feature_schema.get("used_features", [])),
          "params": (e.config or {}).get("params"), "artifact_sha256": e.artifact_sha256[:16],
-         "dataset_fingerprint": e.dataset_fingerprint}
+         "dataset_fingerprint": e.dataset_fingerprint, "mlflow_run_id": (e.config or {}).get("mlflow_run_id")}
     if full:
         d.update(config=e.config, feature_schema=e.feature_schema, artifact_path=e.artifact_path)
     return d
@@ -63,7 +63,7 @@ def list_evals(pid: int, kind: str | None = None, db: Session = Depends(get_db))
                     "model_version": r.model_version, "family": e.model_family if e else None,
                     "model_status": e.status if e else None, "n_samples": r.n_samples,
                     "created_at": str(r.created_at), "summary": r.metrics.get("summary"),
-                    "dataset_definition": r.dataset_definition})
+                    "dataset_definition": r.dataset_definition, "mlflow_run_id": r.metrics.get("mlflow_run_id")})
     return out
 
 
@@ -75,7 +75,8 @@ def get_eval(run_id: int, db: Session = Depends(get_db)):
     e = db.get(ModelRegistry, r.model_version)
     return {"evaluation_run_id": r.evaluation_run_id, "kind": r.kind, "split": r.split,
             "model_version": r.model_version, "family": e.model_family if e else None, "n_samples": r.n_samples,
-            "created_at": str(r.created_at), "dataset_definition": r.dataset_definition, "metrics": r.metrics}
+            "created_at": str(r.created_at), "dataset_definition": r.dataset_definition, "metrics": r.metrics,
+            "mlflow_run_id": r.metrics.get("mlflow_run_id")}
 
 
 @router.get("/pitchers/{pid}/leaderboard")
@@ -95,11 +96,19 @@ def leaderboard(pid: int, split: str = "test", db: Session = Depends(get_db)):
                      "bootstrap": m.get("bootstrap"), "ece": m["calibration"]["ece_top_label"],
                      "uncalibrated": m.get("uncalibrated_summary"),
                      "inference_ms_per_pitch": m.get("inference_ms_per_pitch"),
-                     "validation": e.validation_metrics})
+                     "validation": e.validation_metrics, "mlflow_run_id": m.get("mlflow_run_id"),
+                     "model_mlflow_run_id": (e.config or {}).get("mlflow_run_id")})
     hashes = {r.dataset_definition.get("pitch_uid_min") for r, _ in db.execute(q).all()}
     return {"split": split, "rows": sorted(rows, key=lambda x: x["log_loss"]),
             "same_examples": len(rows) <= 1 or len({x["n"] for x in rows}) == 1,
             "note": "Lower log loss / Brier is better. Overlapping game-bootstrap CIs mean no reliable ranking."}
+
+
+@router.get("/tracking")
+def tracking_status():
+    """MLflow mirror status. Postgres remains the source of truth; run ids appear on model / evaluation views."""
+    from ...ml.tracking import get_tracker
+    return get_tracker().status()
 
 
 class ComparePitch(BaseModel):

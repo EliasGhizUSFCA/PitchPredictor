@@ -75,7 +75,16 @@ def latest_by_family(session: Session, pitcher_id: int) -> dict[str, ModelRegist
 
 def promote(session: Session, version: str) -> None:
     e = session.get(ModelRegistry, version)
+    if e is None:
+        raise KeyError(f"Unknown model version {version}")
+    demoted = session.scalars(select(ModelRegistry).where(ModelRegistry.pitcher_id == e.pitcher_id,
+                                                          ModelRegistry.status == "promoted",
+                                                          ModelRegistry.model_version != version)).all()
     session.execute(update(ModelRegistry).where(ModelRegistry.pitcher_id == e.pitcher_id,
                                                 ModelRegistry.status == "promoted").values(status="candidate"))
     e.status = "promoted"
     session.flush()
+    for d in demoted:
+        session.refresh(d)
+    from . import tracking  # optional MLflow mirror: status tags + registry alias (no-op if disabled)
+    tracking.get_tracker().sync_status([*demoted, e])
