@@ -228,7 +228,8 @@ def test_alias_removed_when_promoted_model_cannot_be_registered(session, pipelin
     monkeypatch.setattr(tracking, "get_tracker", lambda: t)
     registry.promote(session, cand.model_version)
     assert registry.promoted(session, PID).model_version == cand.model_version
-    with pytest.raises(Exception):
+    from mlflow.exceptions import MlflowException
+    with pytest.raises(MlflowException):
         t.client.get_model_version_by_alias(name, tracking.PROMOTED_ALIAS)
     tags = t.client.get_run(cand.config["mlflow_run_id"]).data.tags
     assert tags["pitchiq.artifact_logged"] == "false" and "alias removed" in tags["pitchiq.registry_note"]

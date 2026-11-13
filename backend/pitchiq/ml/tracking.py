@@ -305,8 +305,8 @@ class Tracker:
                 self.client.set_tag(rid, T + "incomplete", "true")
                 self.client.set_tag(rid, T + "incomplete_reason", f"{type(e).__name__}: {e}"[:500])
                 self.client.set_terminated(rid, "FAILED")
-            except Exception:  # noqa: BLE001 - the store itself may be what failed
-                pass
+            except Exception as e2:  # noqa: BLE001 - the store itself may be what failed
+                log(logger, "mlflow_mark_failed_failed", run_id=rid, error=f"{type(e2).__name__}: {e2}"[:300])
             raise
         self.client.set_tag(rid, T + "mirror_complete", "true")
         self.client.set_terminated(rid, "FINISHED", end_time=end_ms if end_ms is not None else _ms(None))
