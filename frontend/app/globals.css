@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+html, body { background: #0a0d12; color: #e5e9f0; }
+body { font-feature-settings: "tnum" 1, "cv11" 1; }
+.tnum { font-variant-numeric: tabular-nums; }
+.card { @apply bg-panel border border-edge rounded-xl; }
+.btn { @apply inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition disabled:opacity-40 disabled:cursor-not-allowed; }
+.btn-primary { @apply btn bg-accent text-slate-950 hover:bg-cyan-300; }
+.btn-ghost { @apply btn border border-edge text-slate-200 hover:bg-panel2; }
+.btn-danger { @apply btn border border-red-500/40 text-red-300 hover:bg-red-500/10; }
+.input { @apply bg-panel2 border border-edge rounded-lg px-2.5 py-1.5 text-sm text-slate-100 focus:outline-none focus:border-accent; }
+.label { @apply text-[11px] uppercase tracking-wider text-muted; }
+.th { @apply text-left text-[11px] uppercase tracking-wider text-muted font-medium px-2 py-1.5 border-b border-edge whitespace-nowrap; }
+.td { @apply px-2 py-1.5 border-b border-edge/60 text-sm tnum whitespace-nowrap; }
