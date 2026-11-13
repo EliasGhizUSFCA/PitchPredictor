@@ -168,13 +168,23 @@ be compared in the MLflow UI. Nothing read from MLflow feeds back into training,
   `holdout_benchmark`, `walk_forward` and `ablation` log one run per `evaluation_runs` row. Those runs get
   `<split>_*` summary metrics, Wilson and game-bootstrap CIs, ECE, uncalibrated metrics, and per-config ablation
   deltas (`ablation/<config>/delta_log_loss`). The confusion matrix, calibration curves, breakdowns, bootstrap and
-  distributions are stored as JSON artifacts. Tags: `pitchiq.evaluation_run_id`, `model_version`, `model_run_id`.
+  distributions are stored as JSON artifacts. Tags: `pitchiq.evaluation_run_id`, `model_version`, `model_run_id`,
+  `model_status` (kept current when promotion changes) and `model_status_at_mirror` (fixed snapshot).
+* **Complete runs only.** A run is terminated `FINISHED` with `pitchiq.mirror_complete=true` only after everything is
+  logged. If logging fails part-way, the run is terminated `FAILED` with `pitchiq.incomplete=true`, and no run id is
+  written to Postgres.
 * **Run ids in Postgres.** Run ids are written back to `model_registry.config["mlflow_run_id"]` and
   `evaluation_runs.metrics["mlflow_run_id"]`. These are JSONB keys, not new columns: the mirror is optional, nothing
   queries or joins on the id, and Postgres must stay complete without MLflow. The API returns the ids on model views,
   evaluation views, the leaderboard (`mlflow_run_id`, `model_mlflow_run_id`), and `GET /api/tracking`.
 * **Model registry.** The promoted model is registered as `pitchiq-<pitcher_id>`, and the alias `promoted` follows
-  `registry.promote`. Status tags on the training runs are updated when promotion changes.
+  `registry.promote`. Promotion changes also update the status tags on training runs and the `model_status` tag on
+  their evaluation runs. Each registered version carries `pitchiq.promotion_source`, which is also stored in Postgres
+  as `model_registry.config["promotion_source"]`. `train_all` records `train_all: lowest validation log loss`. The
+  CLI and API record `manual: …`, because a person chose the model and nothing checks their criterion. The current Sale
+  model was promoted before this field existed, so it reads `unrecorded`. If the promoted model has no complete run or
+  its model file was not logged, it is not registered and the `promoted` alias is removed. This stops the alias from
+  naming a model that Postgres no longer promotes. The run is tagged `pitchiq.registry_note` to explain why.
 * **Store.** The default is `sqlite:///backend/mlruns/mlflow.db` with artifacts in `backend/mlruns/artifacts`
   (gitignored). MLflow 3 puts the plain `./mlruns` file store in maintenance mode and refuses to open it unless
   `MLFLOW_ALLOW_FILE_STORE=true`, so the default is a local SQLite store in the same folder. SQLite also supports the
@@ -183,12 +193,19 @@ be compared in the MLflow UI. Nothing read from MLflow feeds back into training,
   `PITCHIQ_MLFLOW_REGISTER_MODELS`. Install the dependency with `pip install -e ".[tracking]"`.
 * **Backfill.** `pitchiq mlflow-backfill` (also the `mlflow_backfill` job) mirrors every existing row, archived ones
   included. Backfilled runs keep the row's original `created_at` as their start time and are tagged
-  `pitchiq.backfilled=true`. Re-running only refreshes status tags: a run id that already exists in the store is
-  reused, and a run that was created but never linked is found by tag and re-linked.
+  `pitchiq.backfilled=true`. Re-running only refreshes tags: a run id that already exists in the store is reused.
+  A run that was created but never linked is found by tag and re-linked, but only if it is complete. Incomplete runs
+  (`RUNNING`/`FAILED`) are tagged `pitchiq.orphaned=true` and the row is mirrored again. They are counted as
+  `incomplete_runs_tagged`.
   On the real database it created **8 training runs** (4 archived, 3 candidate, 1 promoted) and **13 evaluation
   runs** (8 holdout benchmarks, 3 walk-forward, 2 ablations). It registered `519242-lightgbm-v1-20261113T205951` as
   `pitchiq-519242` version 1 with alias `promoted`. An immediate second run created 0 and reported 8 + 13 already
-  mirrored. The store takes about 4 MB.
+  mirrored. The store takes about 4 MB. After the review fixes, re-running the backfill on the existing store created 0
+  runs and re-linked 0, with 8 + 13 already mirrored and 0 incomplete or orphaned runs. It added
+  `split_policy_note` to the 13 evaluation runs, so all 21 runs now carry it, and `model_status_at_mirror` to the
+  13 evaluation runs. It also set the neutral registered-model description and tagged version 1
+  `promotion_source=unrecorded`. Postgres `model_registry` rows were byte-identical before and after (md5 of
+  `config`), and the promoted model is unchanged.
 
 ```bash
 pitchiq mlflow-backfill
@@ -230,8 +247,9 @@ mlflow ui --backend-store-uri sqlite:///backend/mlruns/mlflow.db   # from the re
 * **MLflow mirror:** MLflow is a one-way mirror. Editing or deleting runs in MLflow changes nothing in PitchIQ. A run is
   written after the Postgres row is flushed but before it commits, so a rolled-back transaction can leave an orphan
   run; `mlflow-backfill` tags those `pitchiq.orphaned=true` (runs younger than `--orphan-grace-s`, default 1 h, are
-  skipped because their transaction may still be open). For backfilled runs, the `pitchiq.split_policy` tag records the
-  split configuration at backfill time. It is marked as such because the season split is not stored per row. The
+  skipped because their transaction may still be open). For backfilled runs, training and evaluation alike, the `pitchiq.split_policy` tag
+  records the split configuration at backfill time. It is marked as such (`pitchiq.split_policy_note`) because the
+  season split is not stored per row. The
   registered model version points at the joblib file inside the run. It is not an MLflow "flavor", so
   `mlflow.pyfunc.load_model` cannot load it; load it with `pitchiq.ml.registry`. The Docker image does not install
   the `tracking` extra, so tracking is a no-op there unless you add it.

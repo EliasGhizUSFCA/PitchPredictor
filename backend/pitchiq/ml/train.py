@@ -90,5 +90,6 @@ def train_all(session: Session, pitcher_id: int, families=("majority", "frequenc
             progress((i + 1) / len(families), f"Trained {fam}", i + 1)
     if auto_promote and registry.promoted(session, pitcher_id) is None:
         best = min(entries, key=lambda e: e.validation_metrics["log_loss"])
-        registry.promote(session, best.model_version)  # chosen on VALIDATION, never test
+        registry.promote(session, best.model_version,  # chosen on VALIDATION, never test
+                         source="train_all: lowest validation log loss")
     return entries

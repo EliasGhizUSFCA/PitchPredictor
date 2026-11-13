@@ -19,6 +19,7 @@ predate tracking or were written while tracking was off; it is idempotent.
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -37,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 T = "pitchiq."  # tag namespace
 PROMOTED_ALIAS = "promoted"
+REGISTERED_MODEL_DESCRIPTION = ("PitchIQ promoted next-pitch models. Mirror of Postgres model_registry promotion; "
+                                "how each version was promoted is in its `pitchiq.promotion_source` tag.")
+BACKFILL_SPLIT_NOTE = "split policy is the current configuration at backfill time"
+UNRECORDED_PROMOTION = "unrecorded (promoted before promotion_source was stored)"
 _MAX_PARAM_LEN = 6000
 
 
@@ -96,6 +101,17 @@ def _db_name(obj) -> str:
         return str(s.get_bind().url.database) if s is not None else "unknown"
     except Exception:  # noqa: BLE001
         return "unknown"
+
+
+def _is_complete(run) -> bool:
+    """FINISHED and fully logged. Runs mirrored before `mirror_complete` existed were only ever terminated FINISHED
+    after their last write, so FINISHED + (for training) the late `artifact_logged` tag also counts."""
+    if run.info.status != "FINISHED" or run.data.tags.get(T + "incomplete") == "true":
+        return False
+    t = run.data.tags
+    if t.get(T + "mirror_complete") == "true":
+        return True
+    return t.get(T + "run_kind") != "training" or T + "artifact_logged" in t
 
 
 def split_policy() -> str:
@@ -208,9 +224,6 @@ class Tracker:
         c = self.client
         eid = self.experiment_id(entry.pitcher_id)
         cfg = entry.config or {}
-        fp = entry.dataset_fingerprint or {}
-        cal = entry.calibration or {}
-        vm = entry.validation_metrics or {}
         start = _ms(started_at or entry.created_at)
         tags = {T + "run_kind": "training", T + "model_version": entry.model_version, T + "family": entry.model_family,
                 T + "feature_version": entry.feature_version, T + "status": entry.status,
@@ -222,10 +235,23 @@ class Tracker:
         if cfg.get("ablation"):
             tags[T + "ablation"] = str(cfg["ablation"])
         if backfilled:
-            tags[T + "split_policy_note"] = "split policy is the current configuration at backfill time"
+            tags[T + "split_policy_note"] = BACKFILL_SPLIT_NOTE
+        if entry.status == "promoted":
+            tags[T + "promotion_source"] = cfg.get("promotion_source") or UNRECORDED_PROMOTION
         run = c.create_run(eid, start_time=start, tags=tags, run_name=entry.model_version)
         rid = run.info.run_id
+        with self._finish_or_fail(rid, start if backfilled else None):
+            self._log_training_body(rid, entry, start)
+        if entry.status == "promoted":
+            self.register_promoted(entry, rid)
+        return rid
 
+    def _log_training_body(self, rid: str, entry, start: int) -> None:
+        c = self.client
+        cfg = entry.config or {}
+        fp = entry.dataset_fingerprint or {}
+        cal = entry.calibration or {}
+        vm = entry.validation_metrics or {}
         used = (entry.feature_schema or {}).get("used_features") or cfg.get("features") or []
         params = {"family": entry.model_family, "feature_version": entry.feature_version, "n_features": len(used),
                   "classes": ",".join(entry.classes or []), "n_classes": len(entry.classes or []),
@@ -266,10 +292,24 @@ class Tracker:
         c.set_tag(rid, T + "artifact_logged", str(logged).lower())
         if why:
             c.set_tag(rid, T + "artifact_note", why)
-        c.set_terminated(rid, "FINISHED", end_time=start if backfilled else _ms(None))
-        if entry.status == "promoted":
-            self.register_promoted(entry, rid)
-        return rid
+
+    @contextlib.contextmanager
+    def _finish_or_fail(self, rid: str, end_ms: int | None):
+        """Terminate a run FINISHED only if everything was logged; otherwise FAILED + `pitchiq.incomplete=true`.
+
+        Backfill re-links runs by tag only when they are FINISHED, so a half-written run is never adopted."""
+        try:
+            yield
+        except BaseException as e:
+            try:
+                self.client.set_tag(rid, T + "incomplete", "true")
+                self.client.set_tag(rid, T + "incomplete_reason", f"{type(e).__name__}: {e}"[:500])
+                self.client.set_terminated(rid, "FAILED")
+            except Exception:  # noqa: BLE001 - the store itself may be what failed
+                pass
+            raise
+        self.client.set_tag(rid, T + "mirror_complete", "true")
+        self.client.set_terminated(rid, "FINISHED", end_time=end_ms if end_ms is not None else _ms(None))
 
     def _log_model_file(self, rid: str, entry) -> tuple[bool, str | None]:
         if not self.log_model_artifacts:
@@ -304,7 +344,6 @@ class Tracker:
         """Mirror one `evaluation_runs` row. `entry` is its model_registry row (for family / model run link)."""
         c = self.client
         eid = self.experiment_id(run.pitcher_id)
-        m = run.metrics or {}
         split = run.split
         fam = entry.model_family if entry is not None else "unknown"
         start = _ms(run.created_at)
@@ -314,14 +353,25 @@ class Tracker:
                 T + "database": _db_name(run), T + "split_policy": split_policy(),
                 T + "source_of_truth": "postgres:evaluation_runs", T + "backfilled": str(backfilled).lower(),
                 "mlflow.source.name": "pitchiq mlflow-backfill" if backfilled else f"pitchiq.ml.evaluate.{run.kind}"}
+        if backfilled:
+            tags[T + "split_policy_note"] = BACKFILL_SPLIT_NOTE
         if entry is not None:
             tags[T + "feature_version"] = entry.feature_version
+            # `model_status` is kept current by sync_status / backfill; `model_status_at_mirror` never changes.
             tags[T + "model_status"] = entry.status
+            tags[T + "model_status_at_mirror"] = entry.status
             if (entry.config or {}).get("mlflow_run_id"):
                 tags[T + "model_run_id"] = entry.config["mlflow_run_id"]
         r = c.create_run(eid, start_time=start, tags=tags, run_name=f"{run.kind}-{run.evaluation_run_id}-{fam}")
         rid = r.info.run_id
+        with self._finish_or_fail(rid, start if backfilled else None):
+            self._log_evaluation_body(rid, run, start)
+        return rid
 
+    def _log_evaluation_body(self, rid: str, run, start: int) -> None:
+        c = self.client
+        m = run.metrics or {}
+        split = run.split
         params = {"kind": run.kind, "split": split, "n_samples": run.n_samples}
         params.update({f"dataset.{k}": (v if not isinstance(v, (dict, list)) else _dumps(v))
                        for k, v in (run.dataset_definition or {}).items()})
@@ -361,27 +411,41 @@ class Tracker:
         notes = {k: v for k, v in m.items() if isinstance(v, str) and not k.startswith("mlflow_")}
         if notes:
             c.log_text(rid, _dumps(notes), "notes.json")
-        c.set_terminated(rid, "FINISHED", end_time=start if backfilled else _ms(None))
-        return rid
 
     # ------------------------------------------------------------------ model registry
     @_safe
     def register_promoted(self, entry, run_id: str | None = None) -> str | None:
-        """Register a promoted model in the MLflow model registry and point the `promoted` alias at it."""
+        """Register a promoted model in the MLflow model registry and point the `promoted` alias at it.
+
+        If the promoted entry cannot be registered (no complete run, or its model file was not logged), the alias is
+        removed instead, so it never names a model Postgres no longer promotes."""
         if not self.register_models:
             return None
         c = self.client
+        name = self.experiment_name(entry.pitcher_id)
         rid = run_id or (entry.config or {}).get("mlflow_run_id")
         run = self.get_run(rid)
-        if run is None or run.data.tags.get(T + "artifact_logged") == "false":
+        source = (entry.config or {}).get("promotion_source") or UNRECORDED_PROMOTION
+        why = None
+        if run is None:
+            why = "no mirrored run for the promoted model in this store"
+        elif not _is_complete(run):
+            why = "mirrored run is incomplete"
+        elif run.data.tags.get(T + "artifact_logged") != "true":
+            why = "model file not logged: " + run.data.tags.get(T + "artifact_note", "unknown reason")
+        if why:
+            self._drop_alias(name, keep_run_id=None)
+            if run is not None:
+                c.set_tag(rid, T + "registry_note", f"not registered ({why}); 'promoted' alias removed")
+            log(logger, "mlflow_promoted_not_registered", model_version=entry.model_version, reason=why)
             return None
-        name = self.experiment_name(entry.pitcher_id)
         try:
-            c.get_registered_model(name)
+            rm = c.get_registered_model(name)
         except Exception:  # noqa: BLE001
-            c.create_registered_model(name, tags={T + "pitcher_id": str(entry.pitcher_id)},
-                                      description="PitchIQ promoted next-pitch models (mirror of Postgres "
-                                                  "model_registry; promotion is decided on validation only).")
+            rm = c.create_registered_model(name, tags={T + "pitcher_id": str(entry.pitcher_id)},
+                                           description=REGISTERED_MODEL_DESCRIPTION)
+        if rm.description != REGISTERED_MODEL_DESCRIPTION:
+            c.update_registered_model(name, description=REGISTERED_MODEL_DESCRIPTION)
         existing = c.search_model_versions(f"name='{name}' and run_id='{rid}'")
         if existing:
             mv = existing[0]
@@ -391,19 +455,50 @@ class Tracker:
                                               T + "family": entry.model_family,
                                               T + "artifact_sha256": entry.artifact_sha256},
                                         description=f"{entry.model_version} (joblib artifact, pitchiq loader)")
+        c.set_model_version_tag(name, mv.version, T + "promotion_source", source)
+        c.set_tag(rid, T + "promotion_source", source)
         c.set_registered_model_alias(name, PROMOTED_ALIAS, mv.version)
         return str(mv.version)
 
+    def _drop_alias(self, name: str, keep_run_id: str | None) -> None:
+        c = self.client
+        try:
+            mv = c.get_model_version_by_alias(name, PROMOTED_ALIAS)
+        except Exception:  # noqa: BLE001 - no registered model or no alias yet
+            return
+        if mv.run_id != keep_run_id:
+            c.delete_registered_model_alias(name, PROMOTED_ALIAS)
+
+    def _refresh_training_tags(self, rid: str, e) -> None:
+        self.client.set_tag(rid, T + "status", e.status)
+        if e.status == "promoted":
+            self.client.set_tag(rid, T + "promotion_source",
+                                (e.config or {}).get("promotion_source") or UNRECORDED_PROMOTION)
+
+    def _refresh_evaluation_tags(self, run, e) -> None:
+        """Keep `model_status` current; add tags that older mirrors lacked (never alters a mirrored metric)."""
+        t, rid = run.data.tags, run.info.run_id
+        if t.get(T + "backfilled") == "true" and t.get(T + "split_policy_note") != BACKFILL_SPLIT_NOTE:
+            self.client.set_tag(rid, T + "split_policy_note", BACKFILL_SPLIT_NOTE)
+        if T + "model_status_at_mirror" not in t and T + "model_status" in t:
+            self.client.set_tag(rid, T + "model_status_at_mirror", t[T + "model_status"])
+        if e is not None and t.get(T + "model_status") != e.status:
+            self.client.set_tag(rid, T + "model_status", e.status)
+
     @_safe
     def sync_status(self, entries: Iterable) -> int:
-        """Refresh the status tag on mirrored training runs (and the registry alias for a promoted entry)."""
+        """Refresh status tags on mirrored training runs and on the evaluation runs of those models, then move the
+        registry alias for a promoted entry."""
         n = 0
         for e in entries:
             rid = (e.config or {}).get("mlflow_run_id")
-            if self.get_run(rid) is None:
-                continue
-            self.client.set_tag(rid, T + "status", e.status)
-            n += 1
+            if self.get_run(rid) is not None:
+                self._refresh_training_tags(rid, e)
+                n += 1
+            for r in self._search(self.experiment_id(e.pitcher_id),
+                                  f"tags.`{T}run_kind` = 'evaluation' and tags.`{T}model_version` = "
+                                  f"'{e.model_version}' and tags.`{T}database` = '{_db_name(e)}'"):
+                self._refresh_evaluation_tags(r, e)
             if e.status == "promoted":
                 self.register_promoted(e, rid)
         return n
@@ -412,8 +507,9 @@ class Tracker:
     def backfill(self, session, pitcher_id: int | None = None, orphan_grace_s: float = 3600.0) -> dict:
         """Mirror every model_registry row (archived included) and every evaluation_runs row into MLflow.
 
-        Idempotent: rows whose stored run id exists in this store are only refreshed (status tag). Rows whose run was
-        created but whose id never reached Postgres (rolled-back transaction) are found by tag and re-linked.
+        Idempotent: rows whose stored run id exists in this store are only refreshed (status tags). Rows whose run
+        was created but whose id never reached Postgres are found by tag and re-linked, but only if that run is
+        complete (FINISHED, `pitchiq.mirror_complete`); incomplete runs are tagged orphaned and the row is re-mirrored.
         """
         from sqlalchemy import select
 
@@ -429,19 +525,20 @@ class Tracker:
                                                      "already_mirrored": 0, "failed": 0, "by_status": {}},
                "evaluations": {"total": 0, "created": 0, "relinked": 0, "already_mirrored": 0, "failed": 0,
                                "by_kind": {}},
-               "registered_promoted": [], "orphaned_runs_tagged": 0, "experiments": []}
+               "registered_promoted": [], "incomplete_runs_tagged": 0, "orphaned_runs_tagged": 0,
+               "experiments": []}
         for e in entries:
             rep["models"]["by_status"][e.status] = rep["models"]["by_status"].get(e.status, 0) + 1
             rid = (e.config or {}).get("mlflow_run_id")
             if self.get_run(rid) is not None:
-                self.client.set_tag(rid, T + "status", e.status)
+                self._refresh_training_tags(rid, e)
                 rep["models"]["already_mirrored"] += 1
                 continue
-            found = self._find_by_tags(e.pitcher_id, {"run_kind": "training", "model_version": e.model_version,
-                                                      "database": _db_name(e)})
+            found = self._find_complete(e.pitcher_id, {"run_kind": "training", "model_version": e.model_version,
+                                                       "database": _db_name(e)}, rep)
             if found is not None:
                 rid = found.info.run_id
-                self.client.set_tag(rid, T + "status", e.status)
+                self._refresh_training_tags(rid, e)
                 self.client.set_tag(rid, T + "orphaned", "false")
                 rep["models"]["relinked"] += 1
             else:
@@ -460,20 +557,23 @@ class Tracker:
         rep["evaluations"]["total"] = len(runs)
         for r in runs:
             rep["evaluations"]["by_kind"][r.kind] = rep["evaluations"]["by_kind"].get(r.kind, 0) + 1
+            entry = by_version.get(r.model_version) or session.get(ModelRegistry, r.model_version)
             rid = (r.metrics or {}).get("mlflow_run_id")
-            if self.get_run(rid) is not None:
+            existing = self.get_run(rid)
+            if existing is not None:
+                self._refresh_evaluation_tags(existing, entry)
                 rep["evaluations"]["already_mirrored"] += 1
                 continue
-            found = self._find_by_tags(r.pitcher_id, {"run_kind": "evaluation",
-                                                      "evaluation_run_id": str(r.evaluation_run_id),
-                                                      "database": _db_name(r)})
+            found = self._find_complete(r.pitcher_id, {"run_kind": "evaluation",
+                                                       "evaluation_run_id": str(r.evaluation_run_id),
+                                                       "database": _db_name(r)}, rep)
             if found is not None:
                 rid = found.info.run_id
+                self._refresh_evaluation_tags(found, entry)
                 self.client.set_tag(rid, T + "orphaned", "false")
                 rep["evaluations"]["relinked"] += 1
             else:
-                rid = self.log_evaluation(r, by_version.get(r.model_version) or
-                                          session.get(ModelRegistry, r.model_version), backfilled=True)
+                rid = self.log_evaluation(r, entry, backfilled=True)
                 if rid is None:
                     rep["evaluations"]["failed"] += 1
                     continue
@@ -494,10 +594,24 @@ class Tracker:
                                      {r.pitcher_id for r in runs}})
         return rep
 
-    def _find_by_tags(self, pitcher_id: int, tags: dict):
+    def _find_complete(self, pitcher_id: int, tags: dict, rep: dict):
+        """A complete, unorphaned run carrying `tags`. Incomplete matches are tagged orphaned (never adopted).
+
+        The Postgres row is committed when backfill sees it, and live mirroring happens before commit, so a matching
+        run that is not FINISHED is a failed mirror rather than one still being written."""
         flt = " and ".join(f"tags.`{T}{k}` = '{v}'" for k, v in tags.items())
-        hits = self._search(self.experiment_id(pitcher_id), flt)
-        return hits[0] if hits else None
+        hit = None
+        for run in self._search(self.experiment_id(pitcher_id), flt):
+            if run.data.tags.get(T + "orphaned") == "true":
+                continue
+            if not _is_complete(run):
+                self.client.set_tag(run.info.run_id, T + "orphaned", "true")
+                self.client.set_tag(run.info.run_id, T + "orphan_reason",
+                                    f"incomplete mirror (status {run.info.status}); row re-mirrored")
+                rep["incomplete_runs_tagged"] += 1
+            elif hit is None:
+                hit = run
+        return hit
 
     def _tag_orphans(self, session, pitcher_ids: set[int], grace_s: float) -> int:
         """Runs mirrored from this database whose Postgres row no longer exists (e.g. the transaction rolled back).

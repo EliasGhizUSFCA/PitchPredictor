@@ -73,7 +73,12 @@ def latest_by_family(session: Session, pitcher_id: int) -> dict[str, ModelRegist
     return out
 
 
-def promote(session: Session, version: str) -> None:
+def promote(session: Session, version: str, source: str = "manual") -> None:
+    """Make `version` the pitcher's promoted model.
+
+    `source` records how the decision was made (e.g. `train_all` picks the lowest *validation* log loss; `manual`
+    means a person chose it and nothing here checks their criterion). It is stored in
+    `config["promotion_source"]` and mirrored to MLflow."""
     e = session.get(ModelRegistry, version)
     if e is None:
         raise KeyError(f"Unknown model version {version}")
@@ -83,6 +88,8 @@ def promote(session: Session, version: str) -> None:
     session.execute(update(ModelRegistry).where(ModelRegistry.pitcher_id == e.pitcher_id,
                                                 ModelRegistry.status == "promoted").values(status="candidate"))
     e.status = "promoted"
+    e.config = {**(e.config or {}), "promotion_source": source,
+                "promoted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     session.flush()
     for d in demoted:
         session.refresh(d)

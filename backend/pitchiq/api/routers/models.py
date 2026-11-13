@@ -47,7 +47,7 @@ def get_model(version: str, db: Session = Depends(get_db)):
 
 @router.post("/models/{version}/promote")
 def promote(version: str, db: Session = Depends(get_db)):
-    registry.promote(db, version)
+    registry.promote(db, version, source="manual: POST /api/models/{version}/promote")
     return {"promoted": version}
 
 

@@ -131,7 +131,7 @@ def main(argv=None):
             out(get_tracker().backfill(s, args.pitcher, orphan_grace_s=args.orphan_grace_s))
         elif args.cmd == "promote":
             from .ml.registry import promote
-            promote(s, args.model_version)
+            promote(s, args.model_version, source="manual: pitchiq promote")
             out({"promoted": args.model_version})
 
 
