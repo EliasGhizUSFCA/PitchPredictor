@@ -131,9 +131,9 @@ def main(argv=None):
             out(validate(s, pid))
         elif args.cmd == "features":
             from .features.store import build_and_store
-            from .ml.prospective import record_prospective
+            from .ml.refit import after_ingest
             out(build_and_store(s, pid))
-            out({"prospective_ledger": record_prospective(s, pid)})
+            out(after_ingest(s, pid))  # prospective ledger, then the automatic retraining-policy check
         elif args.cmd == "videos":
             from .video.discovery import build_video_library, coverage
             out(build_video_library(s, pid, max_games=args.max_games, force=args.force))

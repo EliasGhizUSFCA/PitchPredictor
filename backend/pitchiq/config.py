@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     gate_max_dev_ece: float = 0.05  # top-label ECE of chronologically calibrated dev predictions
     gate_min_training_samples: int = 2000
     gate_prob_tolerance: float = 1e-6
+    # Scheduled retraining checked automatically after each feature rebuild (after_each_start | every_6_starts |
+    # weekly | manual = no automatic check). Default chosen on the 2025 (development) policy replay; see docs/np-refit.md.
+    auto_retrain_policy: str = "after_each_start"
 
     data_dir: Path = BACKEND_ROOT / "data"
     artifact_dir: Path = BACKEND_ROOT / "artifacts"

@@ -32,8 +32,8 @@ from ..models_lifecycle import ModelLifecycle
 from . import lifecycle, registry, tracking
 from .evaluate import full_report
 from .models import TemperatureCalibrator
-from .protocol import (DevResult, game_table, load_dated_frame, make_model, per_fold_summaries, role_label,
-                       rolling_dev_evaluate)
+from .protocol import (CALIBRATION_RULE, DevResult, game_table, load_dated_frame, make_model, per_fold_summaries,
+                       role_label, rolling_dev_evaluate)
 from .train import fingerprint
 
 logger = logging.getLogger(__name__)
@@ -48,9 +48,11 @@ def today_utc() -> date:
 
 # ------------------------------------------------------------------ selection records
 def selection_from_dev(res: DevResult) -> dict:
-    return {"family": res.family, "params": res.params, "temperature": res.temperature,
+    return {"family": res.family, "params": res.params, "temperature": res.deployed_temperature,
+            "pooled_temperature": res.temperature, "calibration_applied": res.calibration_applied,
             "dev_metrics": res.dev_metrics(), "grid_results": res.grid_results,
             "raw_oos_log_loss": res.summary_raw["log_loss"],
+            "chrono_calibrated_oos_log_loss": res.summary_cal["log_loss"],
             "calibrated_oos_log_loss_in_sample_T": float(
                 -np.mean(np.log(np.clip(TemperatureCalibrator._apply(np.log(np.clip(res.P_raw, 1e-12, 1)),
                                                                       res.temperature)[np.arange(len(res.y)), res.y],
@@ -64,10 +66,14 @@ def selection_from_entry(session: Session, entry: ModelRegistry) -> dict:
     if lc is None:
         raise LookupError(f"{entry.model_version} has no lifecycle record; re-select instead")
     cfg = entry.config or {}
-    return {"family": entry.model_family, "params": lc.selected_params, "temperature": entry.calibration["temperature"],
+    cal = entry.calibration or {}
+    return {"family": entry.model_family, "params": lc.selected_params, "temperature": cal["temperature"],
+            "pooled_temperature": cal.get("pooled_temperature", cal["temperature"]),
+            "calibration_applied": cal.get("applied", True),
             "dev_metrics": lc.dev_metrics, "grid_results": cfg.get("grid_results") or [],
-            "raw_oos_log_loss": entry.calibration.get("val_log_loss_before"),
-            "calibrated_oos_log_loss_in_sample_T": entry.calibration.get("val_log_loss_after"),
+            "raw_oos_log_loss": cal.get("val_log_loss_before"),
+            "chrono_calibrated_oos_log_loss": cal.get("chrono_calibrated_oos_log_loss"),
+            "calibrated_oos_log_loss_in_sample_T": cal.get("val_log_loss_after"),
             "oos_fingerprint": (entry.dataset_fingerprint or {}).get("development_oos"),
             "dev_evaluation_run_id": lc.dev_evaluation_run_id, "inherited_from": entry.model_version}
 
@@ -93,18 +99,26 @@ def final_fit(session: Session, pitcher_id: int, selection: dict, deployment_cut
     if train.empty:
         raise ValueError("no labeled pitches before the deployment cutoff")
     model = make_model(family, classes, selection["params"]).fit(train, train["label"])
-    model.calibrator = TemperatureCalibrator()
-    model.calibrator.T = float(selection["temperature"])
+    applied = bool(selection.get("calibration_applied", True))
+    if applied:  # the temperature comes from out-of-sample development predictions, never from `train`
+        model.calibrator = TemperatureCalibrator()
+        model.calibrator.T = float(selection["temperature"])
     cutoff = max(train.game_date)
     version = _unique_version(session, pitcher_id, family, tag)
     path, sha = registry.save_artifact(model, version)
     dev = selection["dev_metrics"]
     seasons = sorted({int(x) for x in train.game_season.unique()})
-    calib = {"method": "temperature_scaling", "fit_split": "development_rolling_oos",
-             "temperature": float(selection["temperature"]),
+    calib = {"method": "temperature_scaling" if applied else "none (raw outputs, T=1)",
+             "fit_split": "development_rolling_oos", "applied": applied,
+             "temperature": float(selection["temperature"]) if applied else 1.0,
+             "pooled_temperature": selection.get("pooled_temperature", selection["temperature"]),
+             "rule": CALIBRATION_RULE,
              "val_log_loss_before": selection.get("raw_oos_log_loss"),
+             "chrono_calibrated_oos_log_loss": selection.get("chrono_calibrated_oos_log_loss"),
              "val_log_loss_after": selection.get("calibrated_oos_log_loss_in_sample_T"),
-             "note": "temperature fit on pooled rolling-origin development out-of-sample predictions of this recipe"}
+             "note": ("pooled temperature fit on rolling-origin development out-of-sample predictions of this recipe "
+                      "(val_log_loss_after is that fit's in-sample value on those predictions; "
+                      "chrono_calibrated_oos_log_loss is the honest chronological estimate that the rule uses)")}
     cfg = {**model.config(), "grid_results": selection.get("grid_results") or [],
            "selection": "min rolling-origin development log loss", "training_scope": scope,
            "data_cutoff": str(cutoff), "deployment_cutoff": str(deployment_cutoff), "n_train": int(len(train)),
@@ -120,7 +134,8 @@ def final_fit(session: Session, pitcher_id: int, selection: dict, deployment_cut
                           feature_version=FEATURE_VERSION,
                           feature_schema={**schema_dict(classes), "used_features": model.features}, classes=classes,
                           config=cfg, dataset_fingerprint=fp, artifact_path=path, artifact_sha256=sha,
-                          calibration=calib, validation_metrics=dict(dev), status="candidate")
+                          calibration=calib, validation_metrics=dict(dev), status="candidate",
+                          created_at=datetime.now(timezone.utc))  # wall clock, not transaction start
     session.add(entry)
     session.flush()
     session.add(ModelLifecycle(model_version=version, pitcher_id=pitcher_id, training_scope=scope,
@@ -128,7 +143,7 @@ def final_fit(session: Session, pitcher_id: int, selection: dict, deployment_cut
                                n_train_samples=int(len(train)), n_train_games=int(train.game_pk.nunique()),
                                selected_params=selection["params"], dev_metrics=dev,
                                dev_evaluation_run_id=selection.get("dev_evaluation_run_id"),
-                               retrain_policy=policy, trigger=trigger))
+                               retrain_policy=policy, trigger=trigger, created_at=entry.created_at))
     session.flush()
     tracking.mirror_model_entry(entry, started_at=started_at)
     _tag_run(entry)
@@ -162,16 +177,20 @@ def _tag_run(entry: ModelRegistry) -> None:
 # ------------------------------------------------------------------ stored dev evaluations
 def store_dev_run(session: Session, entry: ModelRegistry, res: DevResult, recipe: str) -> EvaluationRun:
     classes = entry.classes
-    report = full_report(res.P_cal, res.y, res.eval_frame, classes)
-    report.update(uncalibrated_summary=res.summary_raw, dev_metrics=res.dev_metrics(),
+    report = full_report(res.P_deployed, res.y, res.eval_frame, classes)
+    report.update(uncalibrated_summary=res.summary_raw, chrono_calibrated_summary=res.summary_cal,
+                  calibration_applied=res.calibration_applied, deployed_temperature=res.deployed_temperature,
+                  dev_metrics=res.dev_metrics(),
                   evaluation_role="development", evaluation_label=role_label("development"),
                   grid_results=res.grid_results, selected_params=res.params, folds=per_fold_summaries(res, classes),
                   fold_temperatures=res.fold_temperatures, pooled_temperature=res.temperature,
                   recipe=recipe, seconds=res.seconds,
-                  note=("Pooled out-of-sample predictions of rolling-origin development folds. 'summary' is "
-                        "chronologically calibrated (fold f uses a temperature fit on folds before f); "
-                        "'uncalibrated_summary' is the raw selection objective. The selected configuration's score "
-                        "is the minimum over the grid, so it is optimistic by the selection effect."))
+                  note=("Pooled out-of-sample predictions of rolling-origin development folds. 'summary' describes "
+                        "the deployed output under the calibration rule (chronologically calibrated if "
+                        "calibration_applied, else raw); 'chrono_calibrated_summary' uses fold f's temperature fit "
+                        "on folds before f; 'uncalibrated_summary' is the raw selection objective. The selected "
+                        "configuration's score is the minimum over the grid, so it is optimistic by the selection "
+                        "effect."))
     run = EvaluationRun(pitcher_id=entry.pitcher_id, model_version=entry.model_version, kind="rolling_dev_evaluation",
                         split="development", n_samples=int(len(res.y)), metrics=report,
                         dataset_definition={"protocol": "rolling_origin_expanding_window",
@@ -250,8 +269,9 @@ def policy_due(policy: str, new_games: pd.DataFrame, last_fit_at: datetime, toda
         raise ValueError(f"Unknown retraining policy {policy}. Known: {POLICIES}")
     if force:
         return True, "forced"
-    if policy == "manual":
-        return True, "manual trigger (operator ran the job)"
+    if policy == "manual":  # the operator running the job is the trigger, but a refit on identical data is a no-op
+        return n >= 1, (f"manual trigger, {n} completed start(s) since the production data cutoff" if n else
+                        "manual trigger, but no completed start since the production data cutoff (use force)")
     if policy == "after_each_start":
         return n >= 1, f"{n} completed start(s) since the production data cutoff"
     if policy == "every_6_starts":
@@ -296,3 +316,22 @@ def retrain(session: Session, pitcher_id: int, policy: str, force: bool = False,
         rep["promotion"] = lifecycle.promote_with_gates(session, e.model_version,
                                                         source=f"retrain_next_pitch policy={policy}")
     return rep
+
+
+# ------------------------------------------------------------------ after ingestion
+def after_ingest(session: Session, pitcher_id: int, policy: str | None = None) -> dict:
+    """Run after newly completed starts are ingested and their features built (job build_features, CLI features).
+
+    1. Prospective ledger first: the new games are scored by the production model that was trained before them.
+    2. Then the scheduled-retraining check with `policy` (default `Settings.auto_retrain_policy`); "manual" or ""
+       disables the automatic check. A refit is made only if the policy says one is due."""
+    from .prospective import record_prospective
+    out = {"prospective_ledger": record_prospective(session, pitcher_id)}
+    policy = get_settings().auto_retrain_policy if policy is None else policy
+    if not policy or policy == "manual":
+        out["retrain"] = {"skipped": "automatic retraining disabled (policy manual)"}
+    elif registry.promoted(session, pitcher_id) is None:
+        out["retrain"] = {"skipped": "no production model"}
+    else:
+        out["retrain"] = retrain(session, pitcher_id, policy)
+    return out

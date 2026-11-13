@@ -202,7 +202,8 @@ def _record(session: Session, entry: ModelRegistry, action: str, from_status: st
             replaced: str | None, gates: dict | None, source: str | None) -> ModelPromotionEvent:
     ev = ModelPromotionEvent(pitcher_id=entry.pitcher_id, model_version=entry.model_version, action=action,
                              from_status=from_status, to_status=to_status, replaced_version=replaced,
-                             gate_results=gates, source=source)
+                             gate_results=gates, source=source,
+                             created_at=_now())  # wall clock: the prospective ledger compares it with game dates
     session.add(ev)
     lc = lifecycle_row(session, entry.model_version)
     if gates is not None:

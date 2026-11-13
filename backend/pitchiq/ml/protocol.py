@@ -57,6 +57,10 @@ DEV_GRIDS: dict[str, list[dict]] = {
 }
 
 
+CALIBRATION_RULE = ("apply the pooled out-of-sample temperature only if chronologically calibrated rolling "
+                    "development log loss < raw rolling development log loss; otherwise deploy raw outputs (T=1)")
+
+
 # ------------------------------------------------------------------ roles
 def evaluation_role(season: int) -> str:
     s = get_settings()
@@ -231,7 +235,7 @@ class DevResult:
     y: np.ndarray
     eval_frame: pd.DataFrame
     fold_temperatures: list[float]
-    temperature: float  # fit on ALL pooled dev OOS predictions; used by the deployable refit
+    temperature: float  # fit on ALL pooled dev OOS predictions
     summary_raw: dict
     summary_cal: dict
     ece_cal: float
@@ -239,18 +243,40 @@ class DevResult:
     seconds: float
     extra: dict = field(default_factory=dict)
 
+    @property
+    def calibration_applied(self) -> bool:
+        """Predetermined rule: deploy the temperature only if chronological calibration lowered the rolling
+        development log loss relative to the raw outputs (same folds, same pitches)."""
+        return self.summary_cal["log_loss"] < self.summary_raw["log_loss"]
+
+    @property
+    def deployed_temperature(self) -> float:
+        return float(self.temperature) if self.calibration_applied else 1.0
+
+    @property
+    def P_deployed(self) -> np.ndarray:
+        return self.P_cal if self.calibration_applied else self.P_raw
+
     def dev_metrics(self) -> dict:
-        """Compact dict stored with the model (lifecycle.dev_metrics / registry validation_metrics)."""
+        """Compact dict stored with the model (lifecycle.dev_metrics / registry validation_metrics).
+
+        The headline keys (log_loss, brier, top1_accuracy, ..., ece) describe the output the deployed model produces
+        under the calibration rule: chronologically calibrated predictions if calibration is applied, else raw."""
         s = get_settings()
-        return {**self.summary_cal, "ece": self.ece_cal, "raw_log_loss": self.summary_raw["log_loss"],
+        head = self.summary_cal if self.calibration_applied else self.summary_raw
+        return {**head, "ece": self.ece_cal if self.calibration_applied else self.ece_raw,
+                "raw_log_loss": self.summary_raw["log_loss"],
                 "raw_brier": self.summary_raw["brier"], "raw_top1_accuracy": self.summary_raw["top1_accuracy"],
-                "raw_ece": self.ece_raw, "evaluation_role": "development",
+                "raw_ece": self.ece_raw, "chrono_calibrated_log_loss": self.summary_cal["log_loss"],
+                "chrono_calibrated_brier": self.summary_cal["brier"], "chrono_calibrated_ece": self.ece_cal,
+                "evaluation_role": "development",
                 "protocol": "rolling_origin_expanding_window",
                 "eval_seasons": list(self.extra.get("eval_seasons") or s.dev_eval_seasons),
                 "block_games": int(self.extra.get("block_games") or s.dev_block_games),
                 "n_folds": sum(f.skipped is None for f in self.folds),
                 "calibration": "chronological (fold f uses a temperature fit on folds < f)",
-                "pooled_temperature": self.temperature}
+                "calibration_rule": CALIBRATION_RULE, "calibration_applied": bool(self.calibration_applied),
+                "pooled_temperature": self.temperature, "deployed_temperature": self.deployed_temperature}
 
 
 def _stack(folds: list[Fold], df: pd.DataFrame, model_y) -> tuple[list[np.ndarray], pd.DataFrame]:
@@ -327,8 +353,10 @@ def per_fold_summaries(res: DevResult, classes: list[str]) -> list[dict]:
             continue
         n = len(f.eval_idx)
         s = summarize(res.P_cal[off:off + n], res.y[off:off + n], classes)
+        r = summarize(res.P_raw[off:off + n], res.y[off:off + n], classes)
         out.append({**f.meta(), "log_loss": s["log_loss"], "top1_accuracy": s["top1_accuracy"],
-                    "brier": s["brier"], "temperature": res.fold_temperatures[used]})
+                    "brier": s["brier"], "raw_log_loss": r["log_loss"], "raw_top1_accuracy": r["top1_accuracy"],
+                    "temperature": res.fold_temperatures[used]})
         off += n
         used += 1
     return out

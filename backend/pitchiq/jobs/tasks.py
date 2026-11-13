@@ -26,10 +26,11 @@ def t_validate(session, params, ctx):
 
 def t_build_features(session, params, ctx):
     from ..features.store import build_and_store
-    from ..ml.prospective import record_prospective
+    from ..ml.refit import after_ingest
     out = build_and_store(session, _pid(params))
-    # newly ingested completed starts are scored by the production model trained before them (prospective ledger)
-    out["prospective_ledger"] = record_prospective(session, _pid(params))
+    # newly ingested completed starts are scored by the production model trained before them (prospective ledger),
+    # then the scheduled-retraining policy is checked (params.retrain_policy, default Settings.auto_retrain_policy)
+    out.update(after_ingest(session, _pid(params), params.get("retrain_policy")))
     return out
 
 
