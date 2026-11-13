@@ -1,0 +1,5 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2023,"Webb, Logan",657277,Giants,SF,R,87.5,1324,3182,19.641975308641975,0.41609050911376494,CH,Changeup,40,-33.8,6.2,18,-4.4,11.3,-14.3,-3,-21,0.978021978021978,0.07326007326007326
+2023,"Scherzer, Max",453286,Rangers,TEX,R,83.8,347,2465,15.216049382716049,0.14077079107505072,CH,Changeup,36.1,-34.1,2.1,6,2.8,14.4,-14.1,0.4,3,0.7655677655677655,0.5201465201465202
+2023,"Sale, Chris",519242,Red Sox,BOS,L,86.1,219,1670,10.308641975308642,0.1311377245508982,CH,Changeup,33.5,-34.3,-0.8,-2,3.6,18.4,-14.9,3.5,23,0.3992673992673993,0.978021978021978
+2023,"Flaherty, Jack",656427,Orioles,BAL,R,85.3,84,2633,16.253086419753085,0.03190277250284846,CH,Changeup,31.7,-33.1,-1.3,-4,5.7,11.9,-14.3,-2.5,-17,,

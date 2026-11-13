@@ -1,0 +1,4 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2020,"Webb, Logan",657277,Giants,SF,R,91.7,162,998,16.633333333333333,0.1623246492985972,SI,Sinker,27.2,-23.2,3.9,17,5.3,17.3,-14.9,2.4,16,0.9212598425196851,0.9173228346456693
+2020,"Flaherty, Jack",656427,Cardinals,STL,R,92.1,82,719,12.39655172413793,0.11404728789986092,SI,Sinker,24,-22.8,1.1,5,8.1,11.9,-14.8,-2.8,-19,0.6535433070866141,0.09448818897637795
+2020,"Houck, Tanner",656557,Red Sox,BOS,R,91.6,58,265,4.416666666666667,0.2188679245283019,SI,Sinker,31,-23.2,7.9,34,1.8,15,-14.8,0.2,1,0.9921259842519685,0.4881889763779528

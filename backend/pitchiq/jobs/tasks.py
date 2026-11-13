@@ -26,7 +26,39 @@ def t_validate(session, params, ctx):
 
 def t_build_features(session, params, ctx):
     from ..features.store import build_and_store
-    return build_and_store(session, _pid(params))
+    from ..ml.prospective import record_prospective
+    out = build_and_store(session, _pid(params))
+    # newly ingested completed starts are scored by the production model trained before them (prospective ledger)
+    out["prospective_ledger"] = record_prospective(session, _pid(params))
+    return out
+
+
+def t_retrain_next_pitch(session, params, ctx):
+    from ..ml.refit import retrain
+    return retrain(session, _pid(params), params.get("policy", "manual"), force=bool(params.get("force", False)),
+                   reselect=bool(params.get("reselect", False)), promote=params.get("promote", True),
+                   progress=ctx.progress)
+
+
+def t_refit_next_pitch(session, params, ctx):
+    from ..ml.refit import FAMILY_ORDER, refit_all
+    return refit_all(session, _pid(params), params.get("families") or FAMILY_ORDER,
+                     promote=params.get("promote", True), progress=ctx.progress)
+
+
+def t_policy_replay(session, params, ctx):
+    from ..ml.replay import replay_policies
+    runs = replay_policies(session, _pid(params), params.get("families") or ("frequency", "logreg", "lightgbm"),
+                           params.get("seasons") or (2025, 2026), progress=ctx.progress)
+    return {"evaluation_runs": [{"id": r.evaluation_run_id, "season": r.metrics["season"],
+                                 "family": r.metrics["family"], "role": r.metrics["evaluation_role"],
+                                 **{p: d["log_loss"] for p, d in r.metrics["policies"].items()}} for r in runs]}
+
+
+def t_prospective_ledger(session, params, ctx):
+    from ..ml.prospective import prospective_metrics, record_prospective
+    return {"recorded": record_prospective(session, _pid(params)),
+            "metrics": prospective_metrics(session, _pid(params))}
 
 
 def t_video_library(session, params, ctx):
@@ -106,6 +138,10 @@ TASKS = {
     "ablation": t_ablation,
     "full_refresh": t_full_refresh,
     "mlflow_backfill": t_mlflow_backfill,
+    "retrain_next_pitch": t_retrain_next_pitch,
+    "refit_next_pitch": t_refit_next_pitch,
+    "retraining_policy_replay": t_policy_replay,
+    "prospective_ledger": t_prospective_ledger,
 }
 
 DESCRIPTIONS = {
@@ -121,4 +157,26 @@ DESCRIPTIONS = {
     "ablation": "Feature-group ablation on validation",
     "full_refresh": "Ingest -> feeds -> validate -> features -> video library",
     "mlflow_backfill": "Mirror model registry + evaluation runs into MLflow (Postgres stays the source of truth)",
+    "retrain_next_pitch": "Scheduled retraining (policy: after_each_start | every_6_starts | weekly | manual) + gates",
+    "refit_next_pitch": "Rolling development selection, final refit on all data before today, gated promotion",
+    "retraining_policy_replay": "Historical replay of retraining policies (2025 development, 2026 retrospective)",
+    "prospective_ledger": "Score newly ingested starts with the production model trained before them",
 }
+
+
+def t_aging_etl(session, params, ctx):
+    """MLB-wide aging dataset (pitchiq.aging.etl). params: seasons, career_seasons, career (bool, default true),
+    search_pitch_types, min_pitches, min_season_pitches, refresh, refresh_bio, pitcher_id."""
+    from ..aging.etl import run_aging_etl
+    r = run_aging_etl(session, params.get("seasons"), progress=ctx.progress,
+                      use_cache=not params.get("refresh", False),
+                      search_pitch_types=params.get("search_pitch_types", True),
+                      career_pitcher_id=_pid(params) if params.get("career", True) else None,
+                      career_seasons=params.get("career_seasons"), refresh_bio=params.get("refresh_bio", False),
+                      min_pitches=params.get("min_pitches"), min_season_pitches=params.get("min_season_pitches"))
+    return {k: v for k, v in r.items() if k != "sources"}
+
+
+TASKS["aging_etl"] = t_aging_etl
+DESCRIPTIONS["aging_etl"] = ("MLB-wide longitudinal pitcher-season dataset for aging analysis (Savant leaderboards, "
+                             "birth dates, consecutive-season observations, cohorts) + target pitcher's career pitches")

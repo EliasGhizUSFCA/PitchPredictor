@@ -39,14 +39,46 @@ def main(argv=None):
     w.add_argument("--family", default="lightgbm")
     a = sub.add_parser("ablation")
     a.add_argument("--family", default="lightgbm")
-    pr = sub.add_parser("promote")
+    pr = sub.add_parser("promote", help="Gated promotion to production (see `pitchiq gates`)")
     pr.add_argument("model_version")
+    pr.add_argument("--force", action="store_true", help="bypass failing gates (recorded as a manual override)")
+    rf = sub.add_parser("refit", help="Rolling development selection + final refit on all data before today + gates")
+    rf.add_argument("--families", nargs="*", default=["majority", "frequency", "logreg", "lightgbm"])
+    rf.add_argument("--no-promote", action="store_true")
+    rt = sub.add_parser("retrain", help="Scheduled retraining of the production recipe (job retrain_next_pitch)")
+    rt.add_argument("--policy", choices=["after_each_start", "every_6_starts", "weekly", "manual"], default="manual")
+    rt.add_argument("--force", action="store_true")
+    rt.add_argument("--reselect", action="store_true", help="re-run rolling development selection first")
+    rt.add_argument("--no-promote", action="store_true")
+    rp = sub.add_parser("replay-policies", help="Historical replay of retraining policies")
+    rp.add_argument("--families", nargs="*", default=["frequency", "logreg", "lightgbm"])
+    rp.add_argument("--seasons", type=int, nargs="*", default=[2025, 2026])
+    gt = sub.add_parser("gates", help="Evaluate + record promotion gates for a model (no status change)")
+    gt.add_argument("model_version")
+    rb = sub.add_parser("rollback", help="Roll the production model back to previous_production")
+    rb.add_argument("model_version")
+    sub.add_parser("prospective", help="Record + report the prospective ledger")
+    de = sub.add_parser("dev-eval", help="Rolling development evaluation of an existing model's frozen recipe")
+    de.add_argument("model_version")
+    sub.add_parser("protocol", help="Evaluation roles, rolling-development protocol and gate thresholds")
     mb = sub.add_parser("mlflow-backfill", help="Mirror model_registry + evaluation_runs (archived included) into MLflow")
     mb.add_argument("--orphan-grace-s", type=float, default=3600.0,
                     help="skip orphan tagging for runs newer than this (their transaction may still be open)")
     mu = sub.add_parser("mlflow-ui", help="Start the MLflow UI on the configured tracking store")
     mu.add_argument("--port", type=int, default=5000)
     mu.add_argument("--host", default="127.0.0.1")
+    ag = sub.add_parser("aging-etl", help="MLB-wide longitudinal pitcher-season dataset for aging analysis (Savant "
+                                          "leaderboards + birth dates) and the target pitcher's career pitches")
+    ag.add_argument("--seasons", type=int, nargs="*", help="leaderboard seasons (default PITCHIQ_AGING_SEASONS)")
+    ag.add_argument("--career-seasons", type=int, nargs="*",
+                    help="history-only pitch-level seasons for --pitcher (default PITCHIQ_CAREER_SEASONS)")
+    ag.add_argument("--no-career", action="store_true", help="skip the target pitcher's pitch-level career ingest")
+    ag.add_argument("--no-search-pitch-types", action="store_true",
+                    help="skip the per-pitch-type grouped Statcast searches (extension / whiffs per pitch type)")
+    ag.add_argument("--min-pitches", type=int, help="min pitches for a pitch-type season (low_sample flag)")
+    ag.add_argument("--min-season-pitches", type=int, help="min pitches for a qualifying pitcher-season")
+    ag.add_argument("--refresh", action="store_true", help="bypass the raw response cache")
+    ag.add_argument("--refresh-bio", action="store_true", help="re-fetch birth dates already stored")
     sub.add_parser("bootstrap", help="Full pipeline: migrate, ingest, feeds, validate, features, videos, train, benchmark")
     sub.add_parser("worker", help="Run the background job worker")
     sv = sub.add_parser("serve")
@@ -65,7 +97,7 @@ def main(argv=None):
         from alembic.config import Config
         cfg = Config(str(BACKEND_ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "heads")
         return
     if args.cmd == "worker":
         from .jobs.worker import main as wmain
@@ -99,7 +131,9 @@ def main(argv=None):
             out(validate(s, pid))
         elif args.cmd == "features":
             from .features.store import build_and_store
+            from .ml.prospective import record_prospective
             out(build_and_store(s, pid))
+            out({"prospective_ledger": record_prospective(s, pid)})
         elif args.cmd == "videos":
             from .video.discovery import build_video_library, coverage
             out(build_video_library(s, pid, max_games=args.max_games, force=args.force))
@@ -129,10 +163,47 @@ def main(argv=None):
         elif args.cmd == "mlflow-backfill":
             from .ml.tracking import get_tracker
             out(get_tracker().backfill(s, args.pitcher, orphan_grace_s=args.orphan_grace_s))
+        elif args.cmd == "aging-etl":
+            from .aging.etl import run_aging_etl
+            r = run_aging_etl(s, args.seasons, use_cache=not args.refresh,
+                              search_pitch_types=not args.no_search_pitch_types,
+                              career_pitcher_id=None if args.no_career else pid, career_seasons=args.career_seasons,
+                              refresh_bio=args.refresh_bio, min_pitches=args.min_pitches,
+                              min_season_pitches=args.min_season_pitches)
+            out({k: v for k, v in r.items() if k != "sources"})
         elif args.cmd == "promote":
-            from .ml.registry import promote
-            promote(s, args.model_version, source="manual: pitchiq promote")
-            out({"promoted": args.model_version})
+            from .ml.lifecycle import promote_with_gates
+            out(promote_with_gates(s, args.model_version, source="manual: pitchiq promote", force=args.force))
+        elif args.cmd == "refit":
+            from .ml.refit import refit_all
+            out(refit_all(s, pid, args.families, promote=not args.no_promote))
+        elif args.cmd == "retrain":
+            from .ml.refit import retrain
+            out(retrain(s, pid, args.policy, force=args.force, reselect=args.reselect, promote=not args.no_promote))
+        elif args.cmd == "replay-policies":
+            from .ml.replay import replay_policies
+            for r in replay_policies(s, pid, args.families, args.seasons):
+                out({"evaluation_run_id": r.evaluation_run_id, "family": r.metrics["family"],
+                     "season": r.metrics["season"], "role": r.metrics["evaluation_label"],
+                     "policies": {p: {k: d[k] for k in ("log_loss", "brier", "top1_accuracy", "n_refits")}
+                                  for p, d in r.metrics["policies"].items()}})
+        elif args.cmd == "gates":
+            from .ml.lifecycle import check_gates
+            out(check_gates(s, args.model_version))
+        elif args.cmd == "rollback":
+            from .ml.lifecycle import rollback
+            out(rollback(s, args.model_version, source="manual: pitchiq rollback"))
+        elif args.cmd == "prospective":
+            from .ml.prospective import prospective_metrics, record_prospective
+            out({"recorded": record_prospective(s, pid), "metrics": prospective_metrics(s, pid)})
+        elif args.cmd == "dev-eval":
+            from .ml.refit import evaluate_recipe_on_dev
+            from .ml.registry import get_entry
+            r = evaluate_recipe_on_dev(s, get_entry(s, pid, args.model_version))
+            out({"evaluation_run_id": r.evaluation_run_id, "dev_metrics": r.metrics["dev_metrics"]})
+        elif args.cmd == "protocol":
+            from .ml.protocol import protocol_dict
+            out(protocol_dict())
 
 
 if __name__ == "__main__":

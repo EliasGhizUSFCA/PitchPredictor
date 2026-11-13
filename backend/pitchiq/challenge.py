@@ -37,7 +37,11 @@ def create_challenge(session: Session, pitcher_id: int, size: int, strategy: str
     if not 1 <= size <= 1000:
         raise ValueError("size must be 1..1000")
     params = params or {}
-    entry = registry.get_entry(session, pitcher_id, model_version)
+    if model_version is None:  # default: a model whose training data ended before the challenge split
+        from .ml.lifecycle import out_of_sample_entry
+        entry = out_of_sample_entry(session, pitcher_id, split=split)
+    else:
+        entry = registry.get_entry(session, pitcher_id, model_version)
     seed = int(seed if seed is not None else np.random.SeedSequence().entropy % (2**31))
     rng = np.random.default_rng(seed)
     df = _eligible(session, pitcher_id, split, entry.feature_version)

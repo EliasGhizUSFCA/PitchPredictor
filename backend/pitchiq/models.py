@@ -274,7 +274,7 @@ class ModelRegistry(Base):
     artifact_sha256: Mapped[str] = mapped_column(String(64))
     calibration: Mapped[dict | None] = mapped_column(JSONB)
     validation_metrics: Mapped[dict | None] = mapped_column(JSONB)
-    status: Mapped[str] = mapped_column(String(16), default="candidate")  # candidate | promoted | archived
+    status: Mapped[str] = mapped_column(String(24), default="candidate")  # candidate | promoted | previous_production | archived
     created_at: Mapped[datetime] = _now()
 
 
@@ -395,3 +395,7 @@ class DataValidationReport(Base):
     summary: Mapped[dict] = mapped_column(JSONB)
     issues: Mapped[list] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _now()
+
+
+from . import models_lifecycle  # noqa: E402,F401  (np-refit lifecycle tables)
+from . import models_aging  # noqa: E402,F401  (aging dataset tables)

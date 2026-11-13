@@ -1,0 +1,2 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2020,"Houck, Tanner",656557,Red Sox,BOS,R,87.7,19,265,4.416666666666667,0.07169811320754717,FS,Split-Finger,33.9,-30.9,3,10,2,14.8,-11.4,3.5,31,0.8809523809523809,1

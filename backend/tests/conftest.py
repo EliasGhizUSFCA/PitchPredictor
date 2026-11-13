@@ -85,7 +85,7 @@ def pipeline(db_url):
         c.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
     cfg = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     cfg.set_main_option("script_location", str(Path(__file__).parents[1] / "alembic"))
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "heads")
 
     from pitchiq.features.store import build_and_store
     from pitchiq.ingest import pipeline as ing

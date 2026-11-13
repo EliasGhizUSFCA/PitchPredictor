@@ -1,0 +1,7 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2019,"Flaherty, Jack",656427,Cardinals,STL,R,94.3,1476,3179,19.623456790123456,0.46429694872601446,FF,4-Seam Fastball,15.8,-15.6,-0.2,-1,14.4,4.8,-7.8,-3.1,-39,0.4742990654205608,0.17289719626168223
+2019,"Scherzer, Max",453286,Nationals,WSH,R,94.9,1341,2769,17.09259259259259,0.48429035752979416,FF,4-Seam Fastball,16.7,-16.2,-0.5,-3,14.2,12.2,-9.1,3.1,34,0.40420560747663553,0.8294392523364486
+2019,"Sale, Chris",519242,Red Sox,BOS,L,93.4,883,2465,15.216049382716049,0.3582150101419878,FF,4-Seam Fastball,19.7,-16.5,-3.2,-19,12.3,14.8,-8.3,6.5,78,0.08177570093457943,0.9906542056074766
+2019,"Webb, Logan",657277,Giants,SF,R,93.2,294,676,4.172839506172839,0.4349112426035503,FF,4-Seam Fastball,17.8,-16,-1.8,-11,13.5,8.9,-7.7,1.2,15,0.19158878504672897,0.6074766355140186
+2019,"Hernández, Félix",433587,Mariners,SEA,R,89.9,91,1216,7.506172839506172,0.07483552631578948,FF,4-Seam Fastball,20,-17.5,-2.5,-14,13.9,4.9,-6.7,-1.9,-28,0.12383177570093458,0.2827102803738318
+2019,"Sabathia, CC",282332,Yankees,NYY,L,88.8,22,1729,10.67283950617284,0.012724117987275883,FF,4-Seam Fastball,22.9,-18,-4.9,-27,10.9,6.4,-6.4,-0.1,-1,,

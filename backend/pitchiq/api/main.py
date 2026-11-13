@@ -46,3 +46,11 @@ def health():
 
 for r in (pitchers.router, simulator.router, models.router, challenge.router, videos.router, jobs.router):
     app.include_router(r, prefix="/api")
+
+from .routers import lifecycle as _lifecycle  # noqa: E402  (np-refit: protocol, gates, rollback, prospective)
+
+app.include_router(_lifecycle.router, prefix="/api")
+
+from .routers import aging as _aging  # noqa: E402  (aging dataset)
+
+app.include_router(_aging.router, prefix="/api")

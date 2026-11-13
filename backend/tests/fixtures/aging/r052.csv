@@ -1,0 +1,6 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2019,"Hernández, Félix",433587,Mariners,SEA,R,89.4,391,1216,7.506172839506172,0.3215460526315789,SI,Sinker,25.5,-24.5,1,4,8.9,13.9,-14.2,-0.3,-2,0.6856060606060606,0.4318181818181818
+2019,"Flaherty, Jack",656427,Cardinals,STL,R,92,379,3179,19.623456790123456,0.1192198804655552,SI,Sinker,23.5,-23.1,0.4,2,8,11.5,-14.4,-2.9,-20,0.5909090909090909,0.08333333333333333
+2019,"Sale, Chris",519242,Red Sox,BOS,L,92.2,251,2465,15.216049382716049,0.10182555780933063,SI,Sinker,28.3,-24.3,3.9,16,4.6,19.6,-15.5,4.1,27,0.9090909090909091,1
+2019,"Sabathia, CC",282332,Yankees,NYY,L,89.1,248,1729,10.67283950617284,0.1434355118565645,SI,Sinker,25.2,-24,1.2,5,8.4,13.3,-13.5,-0.2,-2,0.696969696969697,0.4356060606060606
+2019,"Webb, Logan",657277,Giants,SF,R,91.8,87,676,4.172839506172839,0.128698224852071,SI,Sinker,24.9,-23.1,1.8,8,7.4,16.3,-14.6,1.7,12,0.7727272727272727,0.8106060606060606

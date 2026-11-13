@@ -1,0 +1,5 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2023,"Webb, Logan",657277,Giants,SF,R,92.3,1055,3182,19.641975308641975,0.33155248271527343,SI,Sinker,31.2,-25.3,5.9,24,0.9,16,-15.2,0.7,5,0.9820143884892086,0.6007194244604317
+2023,"Houck, Tanner",656557,Red Sox,BOS,R,93.4,510,1739,10.734567901234568,0.293271995399655,SI,Sinker,32.5,-24,8.6,36,-1,15.5,-15.4,0.1,0,0.9964028776978417,0.45323741007194246
+2023,"Sale, Chris",519242,Red Sox,BOS,L,93.2,103,1670,10.308641975308642,0.061676646706586825,SI,Sinker,28.4,-24.8,3.6,15,3.3,19.9,-15.6,4.3,27,0.9100719424460432,1
+2023,"Flaherty, Jack",656427,Orioles,BAL,R,90,65,2633,16.253086419753085,0.024686669198632737,SI,Sinker,25.1,-26.3,-1.2,-5,8.6,9.8,-15.1,-5.3,-35,,

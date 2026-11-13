@@ -3,6 +3,8 @@ from sqlalchemy import engine_from_config, pool
 
 from pitchiq.config import get_settings
 from pitchiq.models import Base
+import pitchiq.models_lifecycle  # noqa: E402,F401  (np-refit tables)
+import pitchiq.models_aging  # noqa: E402,F401  (aging dataset tables)
 
 config = context.config
 url = config.attributes.get("database_url") or get_settings().database_url

@@ -61,13 +61,21 @@ def get_entry(session: Session, pitcher_id: int, version: str | None) -> ModelRe
     return e
 
 
-def latest_by_family(session: Session, pitcher_id: int) -> dict[str, ModelRegistry]:
+def latest_by_family(session: Session, pitcher_id: int, include_lifecycle: bool = False) -> dict[str, ModelRegistry]:
+    """Latest non-archived season-split model per family (benchmarks, walk-forward, ablation, comparisons).
+
+    Lifecycle models (deployment refits / scheduled retrains, see ml/refit.py) are trained on every season up to the
+    deployment cutoff, so they are excluded unless `include_lifecycle`: scoring them on a held-out split would be
+    in-sample."""
     rows = session.scalars(select(ModelRegistry).where(ModelRegistry.pitcher_id == pitcher_id,
                                                        ModelRegistry.status != "archived")
                            .order_by(ModelRegistry.created_at.desc())).all()
     out = {}
     for r in rows:
         if (r.config or {}).get("ablation"):
+            continue
+        if not include_lifecycle and (r.config or {}).get("training_scope") in ("deployment_refit",
+                                                                                 "scheduled_retrain"):
             continue
         out.setdefault(r.model_family, r)
     return out
@@ -83,10 +91,17 @@ def promote(session: Session, version: str, source: str = "manual") -> None:
     if e is None:
         raise KeyError(f"Unknown model version {version}")
     demoted = session.scalars(select(ModelRegistry).where(ModelRegistry.pitcher_id == e.pitcher_id,
-                                                          ModelRegistry.status == "promoted",
+                                                          ModelRegistry.status.in_(("promoted", "previous_production")),
                                                           ModelRegistry.model_version != version)).all()
+    # One rollback slot: the outgoing production model becomes previous_production (see ml/lifecycle.rollback);
+    # the older previous_production returns to candidate. Nothing is deleted.
     session.execute(update(ModelRegistry).where(ModelRegistry.pitcher_id == e.pitcher_id,
-                                                ModelRegistry.status == "promoted").values(status="candidate"))
+                                                ModelRegistry.status == "previous_production",
+                                                ModelRegistry.model_version != version).values(status="candidate"))
+    session.execute(update(ModelRegistry).where(ModelRegistry.pitcher_id == e.pitcher_id,
+                                                ModelRegistry.status == "promoted",
+                                                ModelRegistry.model_version != version)
+                    .values(status="previous_production"))
     e.status = "promoted"
     e.config = {**(e.config or {}), "promotion_source": source,
                 "promoted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}

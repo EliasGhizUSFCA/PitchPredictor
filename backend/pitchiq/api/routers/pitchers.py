@@ -12,6 +12,7 @@ from ...ml.inference import predict_historical
 from ...models import (Batter, DataValidationReport, EvaluationRun, Game, Pitch, PitchPrediction, Pitcher,
                        PrePitchState)
 from ...pitch_types import pitch_name
+from ...seasons import modeling_seasons
 from ...video.discovery import coverage
 
 router = APIRouter(tags=["pitchers"])
@@ -21,7 +22,8 @@ router = APIRouter(tags=["pitchers"])
 def list_pitchers(db: Session = Depends(get_db)):
     out = []
     for p in db.scalars(select(Pitcher).order_by(Pitcher.is_active_target.desc(), Pitcher.full_name)):
-        n = db.scalar(select(func.count()).select_from(Pitch).where(Pitch.pitcher_id == p.pitcher_id))
+        n = db.scalar(select(func.count()).select_from(Pitch).where(Pitch.pitcher_id == p.pitcher_id,
+                                                                    Pitch.season.in_(modeling_seasons())))
         out.append({"pitcher_id": p.pitcher_id, "full_name": p.full_name, "throws": p.throws, "seasons": p.seasons,
                     "pitches": n, "is_active_target": p.is_active_target})
     return out
@@ -45,12 +47,14 @@ def summary(pid: int, db: Session = Depends(get_db)):
         PrePitchState.pitcher_id == pid, PrePitchState.label.is_not(None)).group_by(PrePitchState.split)).all())
     val = db.scalars(select(DataValidationReport).where(DataValidationReport.pitcher_id == pid)
                      .order_by(DataValidationReport.created_at.desc())).first()
+    in_ms = Pitch.season.in_(modeling_seasons())
     return {
         "pitcher": {"pitcher_id": p.pitcher_id, "full_name": p.full_name, "throws": p.throws, "seasons": p.seasons},
-        "pitches": db.scalar(select(func.count()).select_from(Pitch).where(Pitch.pitcher_id == pid)),
-        "games": db.scalar(select(func.count(func.distinct(Pitch.game_pk))).where(Pitch.pitcher_id == pid)),
+        # Modeling seasons only; history-only career seasons are served by /api/aging.
+        "pitches": db.scalar(select(func.count()).select_from(Pitch).where(Pitch.pitcher_id == pid, in_ms)),
+        "games": db.scalar(select(func.count(func.distinct(Pitch.game_pk))).where(Pitch.pitcher_id == pid, in_ms)),
         "date_range": [str(x) for x in db.execute(select(func.min(Pitch.game_date), func.max(Pitch.game_date))
-                                                  .where(Pitch.pitcher_id == pid)).one()],
+                                                  .where(Pitch.pitcher_id == pid, in_ms)).one()],
         "splits": splits,
         "classes": (p.extra or {}).get("feature_sets", {}).get("v1", {}).get("classes"),
         "promoted_model": None if not promoted else {

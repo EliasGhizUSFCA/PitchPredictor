@@ -1,0 +1,4 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2019,"Hernández, Félix",433587,Mariners,SEA,R,79.3,428,1216,7.506172839506172,0.3519736842105263,CU,Curveball,53.1,-54.2,-1.1,-2,-8.4,9.9,9.1,0.8,8,0.39849624060150374,0.5902255639097744
+2019,"Flaherty, Jack",656427,Cardinals,STL,R,78.2,383,3179,19.623456790123456,0.12047813777917585,CU,Curveball,56.5,-55.4,1.2,2,-11.2,12.9,10.9,2,19,0.5639097744360902,0.7255639097744361
+2019,"Scherzer, Max",453286,Nationals,WSH,R,78.5,240,2769,17.09259259259259,0.0866738894907909,CU,Curveball,51.3,-54.7,-3.3,-6,-6,10.8,10.8,-0.1,-1,0.22556390977443608,0.49624060150375937

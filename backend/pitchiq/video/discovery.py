@@ -13,6 +13,7 @@ from ..config import get_settings
 from ..http import SourceUnavailable
 from ..logging_setup import log
 from ..models import Game, Pitch, VideoAsset
+from ..seasons import modeling_seasons
 from .matching import PitchKey, match
 from .providers.base import VideoProvider
 from .providers.licensed_local import LicensedLocalProvider
@@ -31,8 +32,10 @@ def default_providers() -> list[VideoProvider]:
 
 
 def _games_needing_discovery(session: Session, pitcher_id: int, stale_days: int, force: bool) -> list[int]:
+    # Modeling seasons only: history-only career seasons (pitchiq.aging) are not part of the video library.
     games = session.scalars(select(Game.game_pk).where(
-        Game.game_pk.in_(select(Pitch.game_pk).where(Pitch.pitcher_id == pitcher_id))).order_by(Game.game_date)).all()
+        Game.game_pk.in_(select(Pitch.game_pk).where(Pitch.pitcher_id == pitcher_id,
+                                                     Pitch.season.in_(modeling_seasons())))).order_by(Game.game_date)).all()
     if force:
         return list(games)
     cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
@@ -134,7 +137,8 @@ def verify_availability(session: Session, pitcher_id: int, limit: int = 50, asse
 
 def coverage(session: Session, pitcher_id: int) -> dict:
     total = session.scalar(select(func.count()).select_from(Pitch).where(Pitch.pitcher_id == pitcher_id,
-                                                                         Pitch.pitch_type.is_not(None)))
+                                                                         Pitch.pitch_type.is_not(None),
+                                                                         Pitch.season.in_(modeling_seasons())))
     def cnt(*conds):
         return session.scalar(select(func.count(func.distinct(VideoAsset.pitch_uid))).where(
             VideoAsset.pitcher_id == pitcher_id, VideoAsset.pitch_uid.is_not(None), *conds)) or 0

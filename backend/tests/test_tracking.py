@@ -116,13 +116,15 @@ def test_promoted_model_registered_and_alias_follows_promotion(session, tracker)
         assert mv2.run_id == other.config["mlflow_run_id"]
         assert mv2.tags["pitchiq.promotion_source"] == "manual"
         assert tracker.client.get_run(other.config["mlflow_run_id"]).data.tags["pitchiq.status"] == "promoted"
-        assert tracker.client.get_run(promoted.config["mlflow_run_id"]).data.tags["pitchiq.status"] == "candidate"
+        # the outgoing production model is kept as the rollback target (np-refit lifecycle)
+        assert tracker.client.get_run(promoted.config["mlflow_run_id"]).data.tags["pitchiq.status"] == \
+            "previous_production"
         # evaluation runs follow the model's live status; the at-mirror snapshot does not move
         for r in eval_runs(other.model_version):
             assert r.data.tags["pitchiq.model_status"] == "promoted"
             assert r.data.tags["pitchiq.model_status_at_mirror"] == "candidate"
         for r in eval_runs(promoted.model_version):
-            assert r.data.tags["pitchiq.model_status"] == "candidate"
+            assert r.data.tags["pitchiq.model_status"] == "previous_production"
     finally:  # restore the original promotion in MLflow too (the DB side is rolled back by the fixture)
         registry.promote(session, promoted.model_version)
     mv3 = tracker.client.get_model_version_by_alias(name, tracking.PROMOTED_ALIAS)
@@ -233,7 +235,7 @@ def test_alias_removed_when_promoted_model_cannot_be_registered(session, pipelin
         t.client.get_model_version_by_alias(name, tracking.PROMOTED_ALIAS)
     tags = t.client.get_run(cand.config["mlflow_run_id"]).data.tags
     assert tags["pitchiq.artifact_logged"] == "false" and "alias removed" in tags["pitchiq.registry_note"]
-    assert t.client.get_run(original.config["mlflow_run_id"]).data.tags["pitchiq.status"] == "candidate"
+    assert t.client.get_run(original.config["mlflow_run_id"]).data.tags["pitchiq.status"] == "previous_production"
     registry.promote(session, original.model_version)
     assert t.client.get_model_version_by_alias(name, tracking.PROMOTED_ALIAS).run_id == \
         original.config["mlflow_run_id"]

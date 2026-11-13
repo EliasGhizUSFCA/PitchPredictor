@@ -49,6 +49,13 @@ def holdout_benchmark(session: Session, pitcher_id: int, model_version: str | No
                       store_predictions: bool = True, progress: Callable | None = None) -> EvaluationRun:
     """Predict EVERY eligible pitch of the split with a frozen model; the primary source of official metrics."""
     entry = registry.get_entry(session, pitcher_id, model_version)
+    from . import lifecycle  # refit models are trained on every season up to their cutoff: refuse in-sample scoring
+    if lifecycle.is_lifecycle_model(entry):
+        first = lifecycle._first_date(session, pitcher_id, split=split)
+        cut = lifecycle.data_cutoff(session, entry)
+        if first is not None and cut is not None and first <= cut:
+            raise ValueError(f"{entry.model_version} was trained on data through {cut}; split '{split}' starts "
+                             f"{first}, so a holdout benchmark would be in-sample")
     model = registry.load_model(entry)
     classes = entry.classes
     df = _attach_meta(session, load_feature_frame(session, pitcher_id, [split], entry.feature_version))

@@ -1,0 +1,5 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2023,"Flaherty, Jack",656427,Orioles,BAL,R,84.4,666,2633,16.253086419753085,0.2529434105582985,SL,Slider,37.2,-37.1,0.1,0,1.2,7.2,5.2,2,38,0.506993006993007,0.7797202797202797
+2023,"Houck, Tanner",656557,Red Sox,BOS,R,83.9,647,1739,10.734567901234568,0.3720529039677976,SL,Slider,41.6,-37.7,3.9,10,-2.5,11.2,5.2,6,115,0.8951048951048951,0.958041958041958
+2023,"Sale, Chris",519242,Red Sox,BOS,L,77.8,627,1670,10.308641975308642,0.37544910179640717,SL,Slider,50,-46.3,3.6,8,-4.4,11.2,10,1.2,12,0.8776223776223776,0.7027972027972028
+2023,"Scherzer, Max",453286,Rangers,TEX,R,84,413,2465,15.216049382716049,0.16754563894523328,SL,Slider,37.2,-37.6,-0.3,-1,1.6,3.4,5.1,-1.8,-34,0.45104895104895104,0.26573426573426573

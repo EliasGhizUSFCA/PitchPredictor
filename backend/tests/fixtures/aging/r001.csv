@@ -1,0 +1,5 @@
+"last_name, first_name",player_id,year,player_age,p_game,p_starting_p,p_formatted_ip,p_out,pa,pitch_count,k_percent,bb_percent,in_zone_percent,oz_swing_percent,z_swing_percent,swing_percent,whiff_percent,edge_percent,f_strike_percent,meatball_percent,iz_contact_percent,oz_contact_percent,fastball_avg_speed,fastball_avg_spin,breaking_avg_speed,breaking_avg_spin,offspeed_avg_speed,offspeed_avg_spin,pitch_hand,arm_angle,xwoba,p_era
+"Houck, Tanner",656557,2020,24,3,3,17.0,51,63,265,33.3,14.3,41.5,26.5,70,44.5,27.1,40.8,54,5.3,84.4,51.2,92.3,2072,82.2,2476,87.7,1819,R,24,.295,0.53
+"Scherzer, Max",453286,2020,35,12,12,67.1,202,295,1213,31.2,7.8,49,30,71.7,50.5,32.5,42.8,65.8,7.8,74.2,52.2,94,2489,82.8,2511,84.9,1440,R,25.4,.321,3.74
+"Webb, Logan",657277,2020,23,13,11,54.1,163,246,998,18.7,9.8,47.9,21.9,64,42.1,22.9,38.5,60.4,7.3,83.7,57.9,92.4,2106,81.5,2712,84.7,1609,R,26.9,.347,5.47
+"Flaherty, Jack",656427,2020,24,9,9,40.1,121,170,719,28.8,9.4,46.2,25.3,67.8,44.9,34.4,41,61.8,7.2,78.7,35.7,93.6,2166,82.1,2369,85.7,1842,R,29.9,.341,4.91

@@ -1,0 +1,2 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2022,"Webb, Logan",657277,Giants,SF,R,82.5,983,3006,18.555555555555557,0.32701264138389885,ST,Sweeper,39.4,-37.7,1.7,5,0.7,10.2,13.1,-2.9,-22,0.7558139534883721,0.08139534883720931

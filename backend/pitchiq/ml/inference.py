@@ -59,7 +59,10 @@ def _clean(v):
 # ------------------------------------------------------------------ historical (blind) prediction
 def predict_historical(session: Session, pitcher_id: int, pitch_uid: int, model_version: str | None = None,
                        context: str = "dashboard", save: bool = True, explain: bool = True) -> dict:
-    entry = registry.get_entry(session, pitcher_id, model_version)
+    from .lifecycle import out_of_sample_entry, training_includes
+    # Default: a model whose training data ended before this pitch's game (production unless it was refit on it).
+    entry = registry.get_entry(session, pitcher_id, model_version) if model_version else \
+        out_of_sample_entry(session, pitcher_id, pitch_uid=pitch_uid)
     tr = Trace("historical_prediction", entry.model_version)
     with tr.stage("historical_game_state_retrieved", {"pitch_uid": pitch_uid}) as st:
         # Load ONLY the stored pre-pitch feature dict. The label column is deliberately not selected.
@@ -84,8 +87,11 @@ def predict_historical(session: Session, pitcher_id: int, pitch_uid: int, model_
             pred_id = pred.prediction_id
             st["outputs"] = {"prediction_id": pred_id, "actual_pitch_known_to_model": False}
     tr.persist(session)
+    from ..models import Pitch
     return {**result, "prediction_id": pred_id, "pitch_uid": pitch_uid, "input_features": feats,
-            "trace": tr.to_dict()}
+            "trace": tr.to_dict(), "model_version": entry.model_version,
+            "training_data_includes_game": training_includes(
+                session, entry, session.scalar(select(Pitch.game_date).where(Pitch.pitch_uid == pitch_uid)))}
 
 
 def _run_model(session: Session, entry: ModelRegistry, X: pd.DataFrame, tr: Trace, explain: bool = True) -> dict:

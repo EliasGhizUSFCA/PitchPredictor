@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .ml.metrics import pitch_count_bucket
 from .pitch_types import pitch_name, result_category
+from .seasons import modeling_seasons
 
 PROVENANCE = {"source": "Baseball Savant Statcast pitch-level data (regular season), batting order from MLB Stats "
                         "API boxscores", "kind": "observed_frequency"}
@@ -19,12 +20,12 @@ SELECT p.pitch_uid, p.game_pk, p.game_date, p.season, p.batter_id, b.full_name A
        p.description, p.events, p.at_bat_number, p.pitch_number, p.game_pitch_seq, p.n_thruorder_pitcher,
        pa.batting_order_slot, CASE WHEN p.inning_topbot='Top' THEN p.away_team ELSE p.home_team END AS opponent
 FROM pitches p JOIN plate_appearances pa USING (game_pk, at_bat_number) LEFT JOIN batters b ON b.batter_id = p.batter_id
-WHERE p.pitcher_id = :pid AND p.pitch_type IS NOT NULL
+WHERE p.pitcher_id = :pid AND p.pitch_type IS NOT NULL AND p.season = ANY(:seasons)
 """
 
 
 def load(session: Session, pitcher_id: int, filters: dict) -> pd.DataFrame:
-    sql, params = BASE_SQL, {"pid": pitcher_id}
+    sql, params = BASE_SQL, {"pid": pitcher_id, "seasons": modeling_seasons()}  # history-only seasons excluded
     for key, col in (("season", "p.season"), ("batter_id", "p.batter_id"), ("game_pk", "p.game_pk"),
                      ("stand", "p.stand")):
         if filters.get(key) is not None:
@@ -130,15 +131,16 @@ def pitcher_analytics(session: Session, pitcher_id: int, filters: dict) -> dict:
 
 
 def filter_options(session: Session, pitcher_id: int) -> dict:
-    seasons = [r[0] for r in session.execute(text("SELECT DISTINCT season FROM pitches WHERE pitcher_id=:p ORDER BY 1"), {"p": pitcher_id})]
+    ms = modeling_seasons()  # history-only (career) seasons are excluded from the dashboard analytics
+    seasons = [r[0] for r in session.execute(text("SELECT DISTINCT season FROM pitches WHERE pitcher_id=:p AND season = ANY(:ms) ORDER BY 1"), {"p": pitcher_id, "ms": ms})]
     games = [dict(r._mapping) for r in session.execute(text(
         """SELECT g.game_pk, g.game_date::text AS game_date,
                   CASE WHEN min(p.inning_topbot)='Top' THEN g.away_team ELSE g.home_team END AS opponent, count(*) AS pitches
-           FROM games g JOIN pitches p USING (game_pk) WHERE p.pitcher_id=:p GROUP BY g.game_pk ORDER BY g.game_date DESC"""),
-        {"p": pitcher_id})]
+           FROM games g JOIN pitches p USING (game_pk) WHERE p.pitcher_id=:p AND p.season = ANY(:ms) GROUP BY g.game_pk ORDER BY g.game_date DESC"""),
+        {"p": pitcher_id, "ms": ms})]
     batters = [dict(r._mapping) for r in session.execute(text(
         """SELECT b.batter_id, b.full_name AS name, count(*) AS pitches FROM pitches p JOIN batters b USING (batter_id)
-           WHERE p.pitcher_id=:p GROUP BY b.batter_id ORDER BY count(*) DESC LIMIT 300"""), {"p": pitcher_id})]
+           WHERE p.pitcher_id=:p AND p.season = ANY(:ms) GROUP BY b.batter_id ORDER BY count(*) DESC LIMIT 300"""), {"p": pitcher_id, "ms": ms})]
     return {"seasons": seasons, "games": games, "batters": batters,
             "counts": [f"{b}-{s}" for b in range(4) for s in range(3)]}
 

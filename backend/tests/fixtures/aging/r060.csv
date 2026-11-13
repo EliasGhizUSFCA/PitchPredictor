@@ -1,0 +1,2 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2019,"Webb, Logan",657277,Giants,SF,R,81.9,159,676,4.172839506172839,0.23520710059171598,ST,Sweeper,42.5,-41.9,0.6,1,-1.3,10.7,16.1,-5.4,-34,0.5294117647058824,0.11764705882352941

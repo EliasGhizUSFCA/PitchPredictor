@@ -1,0 +1,6 @@
+"last_name, first_name",player_id,year,player_age,p_game,p_starting_p,p_formatted_ip,p_out,pa,pitch_count,k_percent,bb_percent,in_zone_percent,oz_swing_percent,z_swing_percent,swing_percent,whiff_percent,edge_percent,f_strike_percent,meatball_percent,iz_contact_percent,oz_contact_percent,fastball_avg_speed,fastball_avg_spin,breaking_avg_speed,breaking_avg_spin,offspeed_avg_speed,offspeed_avg_spin,pitch_hand,arm_angle,xwoba,p_era
+"Sale, Chris",519242,2022,33,2,2,5.2,17,25,102,20,4,53.9,21.3,54.5,39.2,12.5,47.1,60,4.9,93.3,70,94.5,2270,79.2,2348,88.2,1959,L,13.2,.316,3.18
+"Houck, Tanner",656557,2022,26,32,4,60.0,180,247,918,22.7,8.9,45.6,29.3,68,46.9,29.2,44.6,52,6.6,81.8,49.3,94.8,2087,85.4,2556,87.6,1656,R,17,.307,3.15
+"Flaherty, Jack",656427,2022,26,9,8,36.0,108,167,662,19.8,13.2,46.5,22,68.8,43.8,25.9,40.3,54.5,7.6,81.1,55.1,92.8,2254,81.2,2419,87.7,1847,R,28.1,.350,4.25
+"Scherzer, Max",453286,2022,37,23,23,145.1,436,565,2167,30.6,4.2,50.4,34,70.2,52.2,30.6,42.4,66.4,7.9,79,49.3,93.2,2388,82.2,2432,84.1,1399,R,28,.267,2.29
+"Webb, Logan",657277,2022,25,32,32,192.1,577,787,3006,20.7,6.2,49.5,31,63.9,47.3,24.1,44.5,65.3,6.2,85.5,56.4,91.9,1898,82.5,2628,86.4,1492,R,13.8,.300,2.90

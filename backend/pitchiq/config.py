@@ -18,11 +18,34 @@ class Settings(BaseSettings):
     default_pitcher_id: int = 519242  # Chris Sale
     seasons: list[int] = [2023, 2024, 2025, 2026]
     game_types: list[str] = ["R"]  # regular season only
+    # History-only seasons (aging step): pitch-level rows for these seasons may sit in `pitches` for career/aging
+    # analysis, but every modeling path (features, splits, training, simulator history, analytics, video, validation)
+    # reads only `seasons` above. See pitchiq/seasons.py.
+    career_seasons: list[int] = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
+    # MLB-wide aging dataset (Savant season leaderboards). Thresholds define low_sample flags and "qualifying" seasons.
+    aging_seasons: list[int] = list(range(2015, 2027))
+    aging_min_pitch_type_pitches: int = 100
+    aging_min_season_pitches: int = 500
 
     # Chronological split (by season). Adjust after checking sample counts.
     train_seasons: list[int] = [2023, 2024]
     validation_seasons: list[int] = [2025]
     test_seasons: list[int] = [2026]
+
+    # Evaluation roles (np-refit). pre_pitch_states.split keeps train/validation/test; these roles say how a season
+    # may be used. development: model selection, tuning, calibration and promotion gates. retrospective_viewed: the
+    # former "locked test" season, which has been viewed and is reported only as retrospective evidence.
+    development_seasons: list[int] = [2023, 2024, 2025]
+    retrospective_viewed_seasons: list[int] = [2026]
+    # Rolling-origin development evaluation: expanding window, blocks of whole games inside these seasons.
+    dev_eval_seasons: list[int] = [2024, 2025]
+    dev_block_games: int = 5
+
+    # Promotion gates. Fixed before any gated promotion was run; changing them is a protocol change.
+    gate_max_dev_log_loss_regression: float = 0.005  # candidate dev log loss <= production dev log loss + this
+    gate_max_dev_ece: float = 0.05  # top-label ECE of chronologically calibrated dev predictions
+    gate_min_training_samples: int = 2000
+    gate_prob_tolerance: float = 1e-6
 
     data_dir: Path = BACKEND_ROOT / "data"
     artifact_dir: Path = BACKEND_ROOT / "artifacts"

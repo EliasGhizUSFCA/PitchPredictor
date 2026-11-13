@@ -1,0 +1,7 @@
+"last_name, first_name",player_id,year,player_age,p_game,p_starting_p,p_formatted_ip,p_out,pa,pitch_count,k_percent,bb_percent,in_zone_percent,oz_swing_percent,z_swing_percent,swing_percent,whiff_percent,edge_percent,f_strike_percent,meatball_percent,iz_contact_percent,oz_contact_percent,fastball_avg_speed,fastball_avg_spin,breaking_avg_speed,breaking_avg_spin,offspeed_avg_speed,offspeed_avg_spin,pitch_hand,arm_angle,xwoba,p_era
+"Sale, Chris",519242,2019,30,25,25,147.1,442,612,2466,35.6,6,49.9,33.2,61.7,47.4,32,41.9,66,7.5,75.1,54.9,93.1,2363,79,2492,85.2,1965,L,,.283,4.40
+"Flaherty, Jack",656427,2019,23,33,33,196.1,589,772,3179,29.9,7.1,48.2,29.7,67.6,48,30.7,44.1,60.4,6.5,78,50.7,93.8,2179,82.8,2423,86.2,1700,R,,.278,2.75
+"Webb, Logan",657277,2019,22,8,8,39.2,119,174,676,21.3,8,45.6,25.8,64.9,43.6,23.1,40.8,55.7,7.5,86.5,57.9,92.9,2198,81.9,2718,84.9,1576,R,,.346,5.22
+"Hernández, Félix",433587,2019,33,15,15,71.2,215,325,1216,17.5,7.7,47.7,25.5,62.9,43.3,21.6,42,67.1,8.3,87.7,57.4,89.5,2077,80.2,2418,84.7,1734,R,,.367,6.40
+"Sabathia, CC",282332,2019,38,23,22,107.1,322,468,1729,22.9,8.3,45.9,29.9,68.1,47.5,25.1,45,61.5,6.5,83.4,58.6,88.5,2156,79.2,2208,82.7,1885,L,,.315,4.95
+"Scherzer, Max",453286,2019,34,27,27,172.1,517,693,2770,35.1,4.8,50.2,34.2,70.7,52.5,33.9,41.1,70.4,7.9,74,49.7,94.2,2470,83.5,2472,84.3,1551,R,,.253,2.92

@@ -24,6 +24,8 @@ def _entry_view(e: ModelRegistry, full: bool = False) -> dict:
          "n_features": len(e.feature_schema.get("used_features", [])),
          "params": (e.config or {}).get("params"), "artifact_sha256": e.artifact_sha256[:16],
          "dataset_fingerprint": e.dataset_fingerprint, "mlflow_run_id": (e.config or {}).get("mlflow_run_id")}
+    from ...ml.lifecycle import lifecycle_view  # stage (production/previous_production/...), cutoff, gates
+    d.update(lifecycle_view(e))
     if full:
         d.update(config=e.config, feature_schema=e.feature_schema, artifact_path=e.artifact_path)
     return d
@@ -46,9 +48,30 @@ def get_model(version: str, db: Session = Depends(get_db)):
 
 
 @router.post("/models/{version}/promote")
-def promote(version: str, db: Session = Depends(get_db)):
-    registry.promote(db, version, source="manual: POST /api/models/{version}/promote")
-    return {"promoted": version}
+def promote(version: str, force: bool = False, db: Session = Depends(get_db)):
+    """Gated promotion to production. Failing gates leave the model a candidate (409, gate results recorded);
+    `force=true` bypasses them and is recorded as a manual override."""
+    from fastapi.responses import JSONResponse
+
+    from ...ml.lifecycle import promote_with_gates
+    res = promote_with_gates(db, version, source="manual: POST /api/models/{version}/promote", force=force)
+    if not res["promoted"]:
+        failed = [g["gate"] for g in res["gates"]["gates"] if not g["passed"]]
+        db.commit()  # keep the recorded gate results
+        return JSONResponse(status_code=409, content={"detail": f"promotion gates failed: {', '.join(failed)}",
+                                                      "promoted": None, **_jsonable(res)})
+    return {**res, "promoted": version}
+
+
+def _jsonable(d):
+    import json
+    return json.loads(json.dumps(d, default=str))
+
+
+def _role(split: str, metrics: dict | None) -> dict:
+    from ...ml.protocol import role_label, split_role
+    role = (metrics or {}).get("evaluation_role") or split_role(split)
+    return {"evaluation_role": role, "evaluation_label": role_label(role)}
 
 
 @router.get("/pitchers/{pid}/evaluations")
@@ -63,7 +86,8 @@ def list_evals(pid: int, kind: str | None = None, db: Session = Depends(get_db))
                     "model_version": r.model_version, "family": e.model_family if e else None,
                     "model_status": e.status if e else None, "n_samples": r.n_samples,
                     "created_at": str(r.created_at), "summary": r.metrics.get("summary"),
-                    "dataset_definition": r.dataset_definition, "mlflow_run_id": r.metrics.get("mlflow_run_id")})
+                    "dataset_definition": r.dataset_definition, "mlflow_run_id": r.metrics.get("mlflow_run_id"),
+                    **_role(r.split, r.metrics)})
     return out
 
 
@@ -76,7 +100,7 @@ def get_eval(run_id: int, db: Session = Depends(get_db)):
     return {"evaluation_run_id": r.evaluation_run_id, "kind": r.kind, "split": r.split,
             "model_version": r.model_version, "family": e.model_family if e else None, "n_samples": r.n_samples,
             "created_at": str(r.created_at), "dataset_definition": r.dataset_definition, "metrics": r.metrics,
-            "mlflow_run_id": r.metrics.get("mlflow_run_id")}
+            "mlflow_run_id": r.metrics.get("mlflow_run_id"), **_role(r.split, r.metrics)}
 
 
 @router.get("/pitchers/{pid}/leaderboard")
@@ -99,7 +123,7 @@ def leaderboard(pid: int, split: str = "test", db: Session = Depends(get_db)):
                      "validation": e.validation_metrics, "mlflow_run_id": m.get("mlflow_run_id"),
                      "model_mlflow_run_id": (e.config or {}).get("mlflow_run_id")})
     hashes = {r.dataset_definition.get("pitch_uid_min") for r, _ in db.execute(q).all()}
-    return {"split": split, "rows": sorted(rows, key=lambda x: x["log_loss"]),
+    return {"split": split, **_role(split, None), "rows": sorted(rows, key=lambda x: x["log_loss"]),
             "same_examples": len(rows) <= 1 or len({x["n"] for x in rows}) == 1,
             "note": "Lower log loss / Brier is better. Overlapping game-bootstrap CIs mean no reliable ranking."}
 

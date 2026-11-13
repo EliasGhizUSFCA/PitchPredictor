@@ -1,0 +1,6 @@
+"last_name, first_name",player_id,year,player_age,p_game,p_starting_p,p_formatted_ip,p_out,pa,pitch_count,k_percent,bb_percent,in_zone_percent,oz_swing_percent,z_swing_percent,swing_percent,whiff_percent,edge_percent,f_strike_percent,meatball_percent,iz_contact_percent,oz_contact_percent,fastball_avg_speed,fastball_avg_spin,breaking_avg_speed,breaking_avg_spin,offspeed_avg_speed,offspeed_avg_spin,pitch_hand,arm_angle,xwoba,p_era
+"Sale, Chris",519242,2023,34,20,20,102.2,308,425,1670,29.4,6.8,48.3,33.7,63.6,48.1,29.7,45.6,63.5,7.5,78.6,55.7,93.8,2186,77.8,2241,86.1,1992,L,13.2,.295,4.30
+"Flaherty, Jack",656427,2023,27,29,27,144.1,433,650,2634,22.8,10.2,46.2,25.4,65.6,44,26.6,42.3,58.9,6.9,81.2,55.7,92.3,2292,80.8,2475,85.3,1624,R,29.7,.343,4.99
+"Scherzer, Max",453286,2023,38,27,27,152.2,458,621,2465,28,7.2,50.7,30.3,71,51,28.6,43.9,69.9,7.5,79.1,53,92.8,2367,80.3,2477,83.8,1365,R,28.8,.284,3.77
+"Webb, Logan",657277,2023,26,33,33,216.0,648,850,3182,22.8,3.6,49.7,32.4,62.6,47.4,20.8,45.7,65.3,6.8,88.7,61,92.3,1885,84.3,2559,87.5,1476,R,22.1,.295,3.25
+"Houck, Tanner",656557,2023,27,21,21,106.0,318,463,1740,21.4,8.9,48.3,29.3,66.5,47.3,28.8,43.3,61.3,6.3,81.2,50,93,2205,83.9,2593,87.6,1689,R,20.1,.314,5.01

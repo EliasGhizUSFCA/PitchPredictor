@@ -1,0 +1,2 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2022,"Houck, Tanner",656557,Red Sox,BOS,R,87.6,55,918,5.666666666666667,0.05991285403050109,FS,Split-Finger,34.1,-31.5,2.6,8,1.8,14.8,-12,2.8,24,0.9210526315789473,0.9473684210526315

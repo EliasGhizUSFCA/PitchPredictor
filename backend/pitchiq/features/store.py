@@ -20,13 +20,14 @@ SELECT p.pitch_uid, p.game_pk, p.game_date, p.season, p.batter_id AS batter, p.s
        (p.raw->>'pitcher_days_since_prev_game')::float AS days_rest,
        p.pitch_type, p.release_speed, p.description, p.home_team, p.away_team, p.catcher_id
 FROM pitches p JOIN plate_appearances pa USING (game_pk, at_bat_number)
-WHERE p.pitcher_id = :pid
+WHERE p.pitcher_id = :pid AND p.season = ANY(:seasons)  -- modeling seasons only (history-only seasons excluded)
 ORDER BY p.game_date, p.game_pk, p.at_bat_number, p.pitch_number
 """)
 
 
 def load_pitch_frame(session: Session, pitcher_id: int) -> pd.DataFrame:
-    df = pd.read_sql(PITCH_SQL, session.connection(), params={"pid": pitcher_id})
+    from ..seasons import modeling_seasons
+    df = pd.read_sql(PITCH_SQL, session.connection(), params={"pid": pitcher_id, "seasons": modeling_seasons()})
     df["game_date"] = pd.to_datetime(df["game_date"]).dt.date
     return df
 

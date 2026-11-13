@@ -1,0 +1,6 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2022,"Scherzer, Max",453286,Mets,NYM,R,94,984,2167,13.376543209876543,0.45408398707891096,FF,4-Seam Fastball,15,-15.1,0.2,1,16.2,11.1,-8,3.1,39,0.563855421686747,0.8265060240963855
+2022,"Flaherty, Jack",656427,Cardinals,STL,R,93.4,312,662,4.08641975308642,0.47129909365558914,FF,4-Seam Fastball,17.4,-15.9,-1.4,-9,13.9,3.6,-8.5,-4.9,-58,0.26265060240963856,0.04096385542168675
+2022,"Houck, Tanner",656557,Red Sox,BOS,R,95.3,216,918,5.666666666666667,0.23529411764705882,FF,4-Seam Fastball,21,-15.3,-5.7,-37,9.2,10.4,-9.3,1.1,12,0.012048192771084338,0.6048192771084338
+2022,"Webb, Logan",657277,Giants,SF,R,92.3,118,3006,18.555555555555557,0.039254823685961414,FF,4-Seam Fastball,24.8,-17.4,-7.4,-42,7.2,10.4,-9.3,1.1,12,,
+2022,"Sale, Chris",519242,Red Sox,BOS,L,94.9,36,102,0.6296296296296297,0.35294117647058826,FF,4-Seam Fastball,18.4,-15,-3.3,-22,12.4,14.1,-8.6,5.5,64,,

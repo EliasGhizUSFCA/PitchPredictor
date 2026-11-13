@@ -18,6 +18,7 @@ from ..logging_setup import log
 from ..models import (Batter, DataValidationReport, Game, GameLineup, Pitch, Pitcher,
                       PitchSequence, PlateAppearance)
 from ..pitch_types import result_category
+from ..seasons import modeling_seasons
 from . import mlb_stats, statcast
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,8 @@ def ingest_game_feeds(session: Session, pitcher_id: int, progress: Progress | No
     """Fetch official live feeds: lineups, batter metadata and per-game validation evidence."""
     client = client or PoliteClient()
     games = session.scalars(
-        select(Game).where(Game.game_pk.in_(select(Pitch.game_pk).where(Pitch.pitcher_id == pitcher_id).distinct()))
+        select(Game).where(Game.game_pk.in_(select(Pitch.game_pk).where(
+            Pitch.pitcher_id == pitcher_id, Pitch.season.in_(modeling_seasons())).distinct()))
         .order_by(Game.game_date)
     ).all()
     lineup_rows, failures = [], []
@@ -208,7 +210,8 @@ def ingest_game_feeds(session: Session, pitcher_id: int, progress: Progress | No
 def validate(session: Session, pitcher_id: int) -> dict:
     """Automated data validation; persists a report and returns the summary."""
     issues: list[dict] = []
-    pitches = session.scalars(select(Pitch).where(Pitch.pitcher_id == pitcher_id)
+    # Modeling seasons only (history-only career seasons have no lineups/feeds; see pitchiq.aging).
+    pitches = session.scalars(select(Pitch).where(Pitch.pitcher_id == pitcher_id, Pitch.season.in_(modeling_seasons()))
                               .order_by(Pitch.game_pk, Pitch.game_pitch_seq)).all()
     by_game: dict[int, list[Pitch]] = defaultdict(list)
     for p in pitches:

@@ -1,0 +1,6 @@
+year,"last_name, first_name",pitcher_id,team_name,team_name_abbrev,pitch_hand,avg_speed,pitches_thrown,total_pitches,pitches_per_game,pitch_per,pitch_type,pitch_type_name,pitcher_break_z,league_break_z,diff_z,rise,pitcher_break_z_induced,pitcher_break_x,league_break_x,diff_x,tail,percent_rank_diff_z,percent_rank_diff_x
+2023,"Scherzer, Max",453286,Rangers,TEX,R,93.7,1142,2465,15.216049382716049,0.46328600405679515,FF,4-Seam Fastball,15.5,-15.8,0.3,2,15.8,10.8,-8.1,2.7,33,0.6014492753623188,0.7874396135265701
+2023,"Flaherty, Jack",656427,Orioles,BAL,R,93.2,1087,2633,16.253086419753085,0.412837067983289,FF,4-Seam Fastball,17.9,-16.2,-1.7,-11,13.5,2.2,-7.8,-5.6,-72,0.2028985507246377,0.036231884057971016
+2023,"Sale, Chris",519242,Red Sox,BOS,L,93.9,721,1670,10.308641975308642,0.43173652694610776,FF,4-Seam Fastball,20.3,-16.1,-4.2,-26,10.9,14.6,-8.6,6,70,0.036231884057971016,0.9806763285024155
+2023,"Houck, Tanner",656557,Red Sox,BOS,R,93.9,177,1739,10.734567901234568,0.10178263369752731,FF,4-Seam Fastball,22.3,-16.3,-6.1,-37,8.7,8.3,-8.8,-0.4,-5,0.00966183574879227,0.41304347826086957
+2023,"Webb, Logan",657277,Giants,SF,R,92.6,130,3182,19.641975308641975,0.04085480829666876,FF,4-Seam Fastball,23,-17,-6,-35,8.8,10.8,-8.4,2.4,29,,
