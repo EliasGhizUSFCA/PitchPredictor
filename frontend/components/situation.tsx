@@ -38,7 +38,7 @@ export function SituationPanel({ s }: { s: Situation }) {
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div><div className="label">Inning</div><div className="tnum">{s.half === "Top" ? "▲" : "▼"} {s.inning}</div></div>
-        <div><div className="label">Score (ATL-side)</div><div className="tnum">{s.pitcher_team} {s.score.pitcher_team ?? "?"} – {s.score.batting_team ?? "?"} {s.opponent}</div></div>
+        <div><div className="label">Score</div><div className="tnum">{s.pitcher_team} {s.score.pitcher_team ?? "?"} – {s.score.batting_team ?? "?"} {s.opponent}</div></div>
         <div><div className="label">Count</div><div className="text-2xl font-semibold tnum">{s.count.balls}-{s.count.strikes}</div></div>
         <div className="flex items-center gap-2"><Diamond r={s.runners} /><div className="space-y-1 text-xs"><div>B {dots(s.count.balls, 3, "#4ade80")}</div><div>S {dots(s.count.strikes, 2, "#f87171")}</div><div>O {dots(s.outs, 2, "#fbbf24")}</div></div></div>
         <div><div className="label">Pitch count</div><div className="tnum">{s.pitch_count_before ?? "?"} thrown</div></div>

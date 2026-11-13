@@ -15,3 +15,6 @@ body { font-feature-settings: "tnum" 1, "cv11" 1; }
 .label { @apply text-[11px] uppercase tracking-wider text-muted; }
 .th { @apply text-left text-[11px] uppercase tracking-wider text-muted font-medium px-2 py-1.5 border-b border-edge whitespace-nowrap; }
 .td { @apply px-2 py-1.5 border-b border-edge/60 text-sm tnum whitespace-nowrap; }
+
+/* Grid/flex children may shrink below content width; wide content scrolls inside its own container. */
+.grid > * { min-width: 0; }

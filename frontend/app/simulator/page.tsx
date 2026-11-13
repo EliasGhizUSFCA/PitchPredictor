@@ -100,7 +100,7 @@ function Controls({ state, setState, classes }: { state: SimState; setState: (s:
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3">
         <Field label="Batter hand">{seg("stand", ["L", "R"], ["Left", "Right"])}</Field>
-        <Field label="Lineup position">{seg("bat_order_slot", [1, 2, 3, 4, 5, 6, 7, 8, 9])}</Field>
+        <div className="col-span-2 sm:col-span-1"><Field label="Lineup position">{seg("bat_order_slot", [1, 2, 3, 4, 5, 6, 7, 8, 9])}</Field></div>
         <Field label="Balls">{seg("balls", [0, 1, 2, 3])}</Field>
         <Field label="Strikes">{seg("strikes", [0, 1, 2])}</Field>
         <Field label="Inning">{numIn("inning", 1, 12)}</Field>
