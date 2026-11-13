@@ -1,0 +1,37 @@
+# Local development stack: PostgreSQL + API + background worker + Next.js dashboard.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: pitchiq
+      POSTGRES_PASSWORD: pitchiq
+      POSTGRES_DB: pitchiq
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pitchiq"]
+      interval: 3s
+      retries: 20
+  api:
+    build: ./backend
+    environment:
+      PITCHIQ_DATABASE_URL: postgresql+psycopg://pitchiq:pitchiq@db:5432/pitchiq
+    command: sh -c "pitchiq init-db && uvicorn pitchiq.api.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+    volumes: [./backend/data:/app/data, ./backend/artifacts:/app/artifacts]
+    depends_on: {db: {condition: service_healthy}}
+  worker:
+    build: ./backend
+    environment:
+      PITCHIQ_DATABASE_URL: postgresql+psycopg://pitchiq:pitchiq@db:5432/pitchiq
+    command: pitchiq worker
+    volumes: [./backend/data:/app/data, ./backend/artifacts:/app/artifacts]
+    depends_on: {db: {condition: service_healthy}}
+  web:
+    build: ./frontend
+    environment:
+      PITCHIQ_API_URL: http://api:8000
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  pgdata:
