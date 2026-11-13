@@ -113,7 +113,7 @@ export default function PerformancePage() {
               <>
                 <ResponsiveContainer width="100%" height={Math.max(220, rows.length * 24)}>
                   <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 16, left: 40, bottom: 0 }}>
-                    {grid}<XAxis type="number" {...axis} /><YAxis type="category" dataKey="config" {...axis} width={150} tickFormatter={(v) => v.replace("without_", "− ")} />
+                    {grid}<XAxis type="number" {...axis} /><YAxis type="category" dataKey="config" {...axis} interval={0} width={150} tickFormatter={(v) => v.replace("without_", "− ")} />
                     <ReferenceLine x={0} stroke="#64748b" />
                     <Tooltip {...tooltipStyle} formatter={(v: number) => v.toFixed(4)} />
                     <Bar dataKey="delta_log_loss" isAnimationActive={false}>{rows.map((r: any) => <Cell key={r.config} fill={r.delta_log_loss > 0 ? "#22d3ee" : "#f87171"} />)}</Bar>
