@@ -69,8 +69,9 @@ Per-fold raw log loss for lightgbm (run 29):
 | 8 | 2025-08-30 | 5,547 | 0.859 |
 | 9 | 2025-09-28 | 6,049 | 0.994 |
 
-Early 2024 is much harder to predict from a 2023-only window, so the rolling dev log loss is higher than the
-single-season 2025 numbers.
+The early-2024 folds have small training windows (1.7k-2.6k pitches). Only fold 0 is trained on 2023 alone; folds 1
+and later already include the 2024 games before their block (fold 1, the worst at 1.232, has 2023 plus five 2024
+games). These early folds pull the pooled rolling dev log loss above the single-season 2025 numbers.
 
 The selected configuration's score is the minimum over its grid, so it is optimistic by the selection effect.
 
@@ -98,7 +99,13 @@ Each model stores the following in `model_lifecycle` and `model_registry.config/
 * the dev evaluation run id
 
 The same values go to MLflow as tags `pitchiq.data_cutoff`, `pitchiq.training_scope` and
-`pitchiq.deployment_cutoff`, plus metrics `n_train` and `dev_*`.
+`pitchiq.deployment_cutoff`, plus metrics `n_train` and `dev_*`. The generic mirror tags every model run with the
+season-split `pitchiq.split_policy` ("train=[2023, 2024] validation=[2025] test=[2026]"); for lifecycle models it is
+overwritten with the actual scope (e.g. "deployment_refit: fit on all labeled games before 2026-11-14 (data cutoff
+2026-09-23, seasons [2023, 2024, 2025, 2026]); hyperparameters selected on rolling-origin development folds
+[2024, 2025]"), and a `pitchiq.evaluation_roles` tag (development 2023-2025, retrospective_viewed 2026) is added. The
+rolling-dev and replay evaluation runs get the same two tags. The 8 existing lifecycle model runs and 21 rolling-dev /
+replay evaluation runs were re-tagged in place.
 
 | family | model version | status |
 |---|---|---|
@@ -117,7 +124,21 @@ Refit models are trained on 2026, so they cannot have an honest 2026 score:
 * `holdout_benchmark` refuses to score a lifecycle model on a split at or before its data cutoff.
 * `registry.latest_by_family` (benchmarks, walk-forward, ablation) excludes lifecycle models.
 * Historical/blind views (challenge, `predict_historical`) default to the newest model whose data ended before the
-  pitch's game, and report `training_data_includes_game`.
+  pitch's game. `predict_historical` reports `training_data_includes_game`. When no such model exists (challenges on
+  the train split 2023-24 or the validation split 2025: no model's data ended before them), the default falls back to
+  production, i.e. the refit trained on those very pitches. The challenge therefore reports this: each attempt's
+  `prediction` carries `training_data_includes_game`, `evaluation_sample` ("in-sample (model trained on these
+  pitches)" / "partly in-sample" / "out-of-sample") and `model_data_cutoff`, and `challenge_stats` adds
+  `model_trained_on_these_pitches`, `in_sample_pitches`, `evaluation_sample` and an in-sample warning in `note`. On
+  the real DB: train and validation challenges default to `...001434-refit` (in-sample); test challenges default to
+  the legacy `519242-lightgbm-v1-20261113T205951` (data cutoff 2025-09-28, out-of-sample).
+* `POST /api/pitchers/{pid}/models/compare` uses the newest model per family including refits, always includes the
+  production model, and adds `training_scope`, `data_cutoff` and (for a historical pitch) `training_data_includes_game`
+  to each row. On the real DB it now returns the four refits (all in-sample for any 2023-2026 pitch).
+* Simulator support/OOD diagnostics (`ood_report`) and the unknown-previous-pitch marginalization weights use the
+  model's actual fit set: for lifecycle models every labeled pitch from games before the deployment cutoff, for
+  season-split models the train split. For production `...001434-refit`, `training_rows` is now 9,090 (it reported
+  the 4,485 train-split rows before); the response adds `training_support`.
 
 ## 4. Promotion gates, rollback, MLflow aliases
 
@@ -131,7 +152,7 @@ The gates were fixed in `Settings` before any gated promotion. They read develop
 | `artifact_checksum` | the artifact loads and its SHA-256 matches |
 | `probabilities_normalized` | on all 6,516 labeled development pitches: finite, in [0,1], each row sums to 1 within 1e-6 |
 | `min_training_samples` | at least 2,000 |
-| `dev_ece` | dev top-label ECE of the deployed output at most 0.05 |
+| `dev_ece` | dev top-label ECE of the deployed output at most 0.05 (raw ECE when calibration_applied=false, else chronologically calibrated ECE) |
 | `dev_log_loss_vs_production` | candidate dev log loss at most production's + 0.005, on the same folds |
 | `data_not_older_than_production` | the candidate's data cutoff is not before production's |
 | `development_only_provenance` | dev folds and calibration evidence lie inside 2023-2025 |
@@ -150,7 +171,11 @@ A failing candidate stays `candidate`. Its gate results are written to `model_li
 
 Real promotion, event in `model_promotion_events`: lightgbm `...001434-refit` passed all 7 gates:
 
-* dev ECE 0.0121
+* dev ECE 0.0121 (raw ECE: the deployed output is raw because calibration_applied=false; the chronologically
+  calibrated ECE is 0.0325). The detail text stored with that promotion (event 5) wrongly described the value as
+  "chronologically calibrated"; the wording was fixed and the gates were re-evaluated with `check_gates` (event 6,
+  action `gates_evaluated`, all 7 passed, same values, no status change), which also replaced
+  `model_lifecycle.gate_results`. Event 5 is kept unchanged as the historical record.
 * dev log loss 1.0713, against the limit 1.0796 = production 1.0746 + 0.005
 * 9,090 training samples
 * max row-sum error 3.3e-16
@@ -185,55 +210,88 @@ DB, `pitchiq retrain --policy after_each_start` returned `due: false` (0 complet
 
 ### Policy replay (evaluation_runs kind `retraining_policy_replay`)
 
-For each game of the replay season, the replay uses the model each policy would have had deployed that day. It is
-fit on all games dated before that policy's last refit, using the family's dev-selected recipe and raw outputs (the
-deployed outputs, given the calibration rule). The 95% CI is a game-cluster bootstrap with 300 resamples.
+The replay (`ml/replay.py`) simulates the live rule above, `refit.policy_due`, day by day and continuously across
+2025 and 2026:
 
-**2025, development.** 21 games, 2,031 pitches. Runs 30 (frequency), 32 (logreg), 34 (lightgbm).
+* At the first 2025 game (2025-03-27) a model is deployed, fit on all 4,485 earlier pitches (2023-24). This
+  `initial_fit` is not counted as a refit.
+* On every calendar day after that, before that day's game, the policy is checked exactly as live: new completed
+  starts are the games after the deployed model's data cutoff and before that day; the last-fit time is the day of
+  the last (re)fit; a due refit trains on all games dated before that day. So `weekly` is "at least 7 days since the
+  last fit and at least 1 new start" (not calendar Mondays), `every_6_starts` counts starts since the deployed cutoff
+  across the offseason, and no policy gets a free season-start refit.
+* `manual`: live, the job runs only when an operator triggers it. The replay assumes no operator trigger, so the
+  2025-03-27 deployment serves both seasons. This is the "never retrain" lower bound, not a model of a particular
+  operator's habits.
+* `refits` counts refit events between the previous replayed season's last game (exclusive) and this season's last
+  game, so the 2026 count includes offseason refits triggered by late-2025 starts. `models` is the number of distinct
+  models that served the season's games.
 
-| family | policy | refits | log loss | 95% CI | Brier | top-1 | top-2 | ECE |
-|---|---|---|---|---|---|---|---|---|
-| lightgbm | after_each_start | 20 | **0.9409** | 0.889-1.003 | 0.5474 | 0.5623 | 0.8872 | 0.0357 |
-| lightgbm | weekly | 17 | 0.9416 | 0.890-1.003 | 0.5475 | 0.5613 | 0.8872 | 0.0359 |
-| lightgbm | every_6_starts | 3 | 0.9548 | 0.911-1.011 | 0.5531 | 0.5579 | 0.8872 | 0.0436 |
-| lightgbm | manual (season-start fit only) | 0 | 0.9719 | 0.937-1.010 | 0.5620 | 0.5559 | 0.8897 | 0.0681 |
-| logreg | after_each_start | 20 | 0.9576 | 0.906-1.013 | 0.5620 | 0.5411 | 0.8922 | 0.0245 |
-| logreg | weekly | 17 | 0.9577 | | 0.5619 | 0.5411 | 0.8922 | 0.0281 |
-| logreg | every_6_starts | 3 | 0.9669 | | 0.5650 | 0.5347 | 0.8932 | 0.0318 |
-| logreg | manual | 0 | 0.9780 | | 0.5681 | 0.5332 | 0.8927 | 0.0258 |
-| frequency | after_each_start | 20 | 0.9763 | 0.935-1.025 | 0.5659 | 0.5367 | 0.8897 | 0.0574 |
-| frequency | weekly | 17 | 0.9764 | | 0.5659 | 0.5377 | 0.8897 | 0.0586 |
-| frequency | every_6_starts | 3 | 0.9809 | | 0.5680 | 0.5352 | 0.8897 | 0.0588 |
-| frequency | manual | 0 | 0.9905 | | 0.5728 | 0.5185 | 0.8897 | 0.0520 |
+Each fit uses the family's dev-selected recipe and raw outputs (the deployed outputs, given the calibration rule).
+The 95% CI is a game-cluster bootstrap with 300 resamples. The simulation rule is stored with each run
+(`metrics.simulation`, `dataset_definition.simulation`).
 
-**2026, retrospective (previously viewed).** 27 games, 2,574 pitches. Runs 31, 33, 35. Not used for any choice.
+An earlier version of the replay (runs 30-35) did not follow the live rule: it refit `weekly` on calendar Mondays and
+gave every policy, including `manual`, an uncounted fit at each season start. Those runs are kept but superseded by
+runs 36-41 below. The 2025 after_each_start, every_6_starts and manual numbers are unchanged (their 2025 schedules
+were the same); weekly 2025 and all of 2026 changed, most of all 2026 manual (1.0265 before, 1.0640 now, because it
+no longer gets a 2026 season-start fit).
 
-| family | policy | refits | log loss | 95% CI | Brier | top-1 | top-2 | ECE |
-|---|---|---|---|---|---|---|---|---|
-| lightgbm | after_each_start | 26 | **0.9968** | 0.966-1.023 | 0.5852 | 0.5012 | 0.8380 | 0.0243 |
-| lightgbm | weekly | 25 | 0.9970 | | 0.5852 | 0.5012 | 0.8380 | 0.0247 |
-| lightgbm | every_6_starts | 4 | 1.0031 | | 0.5880 | 0.5008 | 0.8384 | 0.0148 |
-| lightgbm | manual | 0 | 1.0265 | 0.998-1.053 | 0.5985 | 0.4922 | 0.8260 | 0.0186 |
-| logreg | after_each_start | 26 | 1.0213 | | 0.5985 | 0.4829 | 0.8322 | 0.0335 |
-| logreg | weekly | 25 | 1.0214 | | 0.5985 | 0.4825 | 0.8322 | 0.0344 |
-| logreg | every_6_starts | 4 | 1.0251 | | 0.6000 | 0.4821 | 0.8333 | 0.0370 |
-| logreg | manual | 0 | 1.0434 | | 0.6072 | 0.4825 | 0.8271 | 0.0486 |
-| frequency | after_each_start | 26 | 1.0170 | | 0.5993 | 0.4790 | 0.8318 | 0.0134 |
-| frequency | weekly | 25 | 1.0171 | | 0.5993 | 0.4790 | 0.8318 | 0.0128 |
-| frequency | every_6_starts | 4 | 1.0193 | | 0.6003 | 0.4798 | 0.8326 | 0.0182 |
-| frequency | manual | 0 | 1.0333 | | 0.6072 | 0.4751 | 0.8205 | 0.0178 |
+**2025, development.** 21 games, 2,031 pitches. Runs 36 (frequency), 38 (logreg), 40 (lightgbm).
+
+| family | policy | refits | models | log loss | 95% CI | Brier | top-1 | top-2 | ECE |
+|---|---|---|---|---|---|---|---|---|---|
+| lightgbm | after_each_start | 20 | 21 | **0.9409** | 0.889-1.003 | 0.5474 | 0.5623 | 0.8872 | 0.0357 |
+| lightgbm | weekly | 17 | 18 | 0.9424 | 0.891-1.004 | 0.5479 | 0.5657 | 0.8882 | 0.0384 |
+| lightgbm | every_6_starts | 3 | 4 | 0.9548 | 0.911-1.011 | 0.5531 | 0.5579 | 0.8872 | 0.0436 |
+| lightgbm | manual | 0 | 1 | 0.9719 | 0.937-1.010 | 0.5620 | 0.5559 | 0.8897 | 0.0681 |
+| logreg | after_each_start | 20 | 21 | 0.9576 | 0.906-1.013 | 0.5620 | 0.5411 | 0.8922 | 0.0245 |
+| logreg | weekly | 17 | 18 | 0.9585 | 0.908-1.014 | 0.5622 | 0.5396 | 0.8912 | 0.0250 |
+| logreg | every_6_starts | 3 | 4 | 0.9669 | 0.920-1.020 | 0.5650 | 0.5347 | 0.8932 | 0.0318 |
+| logreg | manual | 0 | 1 | 0.9780 | 0.935-1.025 | 0.5681 | 0.5332 | 0.8927 | 0.0258 |
+| frequency | after_each_start | 20 | 21 | 0.9763 | 0.935-1.025 | 0.5659 | 0.5367 | 0.8897 | 0.0574 |
+| frequency | weekly | 17 | 18 | 0.9767 | 0.935-1.025 | 0.5661 | 0.5342 | 0.8897 | 0.0551 |
+| frequency | every_6_starts | 3 | 4 | 0.9809 | 0.941-1.028 | 0.5680 | 0.5352 | 0.8897 | 0.0588 |
+| frequency | manual | 0 | 1 | 0.9905 | 0.953-1.035 | 0.5728 | 0.5185 | 0.8897 | 0.0520 |
+
+lightgbm 2025 refit days: weekly 2025-04-03 ... 2025-06-19 every 7 days, then 2025-08-31 ... 2025-09-28 (no starts
+in between); every_6_starts 2025-04-26, 2025-05-30, 2025-09-11.
+
+**2026, retrospective (previously viewed).** 27 games, 2,574 pitches. Runs 37, 39, 41 (state carried over from the
+2025 replay). Not used for any choice.
+
+| family | policy | refits | models | log loss | 95% CI | Brier | top-1 | top-2 | ECE |
+|---|---|---|---|---|---|---|---|---|---|
+| lightgbm | after_each_start | 27 | 27 | **0.9968** | 0.966-1.023 | 0.5852 | 0.5012 | 0.8380 | 0.0243 |
+| lightgbm | weekly | 26 | 26 | 0.9974 | 0.967-1.024 | 0.5855 | 0.5031 | 0.8384 | 0.0219 |
+| lightgbm | every_6_starts | 4 | 5 | 1.0040 | 0.974-1.032 | 0.5882 | 0.5023 | 0.8353 | 0.0179 |
+| lightgbm | manual | 0 | 1 | 1.0640 | 1.038-1.087 | 0.6130 | 0.4701 | 0.8182 | 0.0209 |
+| logreg | after_each_start | 27 | 27 | 1.0213 | 0.989-1.049 | 0.5985 | 0.4829 | 0.8322 | 0.0335 |
+| logreg | weekly | 26 | 26 | 1.0215 | 0.989-1.049 | 0.5985 | 0.4825 | 0.8318 | 0.0340 |
+| logreg | every_6_starts | 4 | 5 | 1.0253 | 0.991-1.054 | 0.6000 | 0.4837 | 0.8302 | 0.0352 |
+| logreg | manual | 0 | 1 | 1.0588 | 1.029-1.085 | 0.6100 | 0.4841 | 0.8283 | 0.0225 |
+| frequency | after_each_start | 27 | 27 | 1.0170 | 0.988-1.042 | 0.5993 | 0.4790 | 0.8318 | 0.0134 |
+| frequency | weekly | 26 | 26 | 1.0171 | 0.988-1.042 | 0.5993 | 0.4794 | 0.8318 | 0.0124 |
+| frequency | every_6_starts | 4 | 5 | 1.0197 | 0.991-1.044 | 0.6005 | 0.4786 | 0.8310 | 0.0138 |
+| frequency | manual | 0 | 1 | 1.0507 | 1.027-1.072 | 0.6134 | 0.4596 | 0.8205 | 0.0156 |
+
+lightgbm 2026: after_each_start's 27 refits include the one on 2025-09-29 after the last 2025 start; weekly's first
+is 2025-10-05; every_6_starts serves the first 2026 games with its 2025-09-11 model and refits on 2026-04-07 (the
+6th start since its 2025-09-10 data cutoff: three late-2025 starts, 2025-09-16/22/28, plus the first three of 2026), 2026-05-15, 2026-06-29 and 2026-08-09.
 
 What the replay shows:
 
-* In 2025, refitting during the season beats one season-start fit for every family. For lightgbm, after_each_start
-  is 0.031 lower in log loss than manual.
-* after_each_start and weekly are practically tied (difference 0.0007 or less). Weekly has a few days' delay but fewer
-  refits.
+* In 2025, refitting during the season beats never refitting for every family. For lightgbm, after_each_start is
+  0.031 lower in log loss than manual.
+* after_each_start and weekly are practically tied (difference 0.0015 or less in 2025, 0.0006 or less in 2026), far
+  inside the bootstrap CIs. Weekly refits a few days later but slightly less often.
 * every_6_starts sits in between.
+* Not retraining at all (manual without an operator trigger) costs the most in 2026 (lightgbm 1.0640 vs 0.9968),
+  because the 2025-03-27 model never sees 2025 or 2026.
 * The 2026 retrospective numbers show the same ordering. The lightgbm after_each_start value of 0.9968 is consistent
   with the earlier walk-forward result of 1.001.
-* `after_each_start` was chosen as the default from 2025 only, where it was lowest for all three families. The
-  margin over weekly is far inside the bootstrap CIs.
+* `Settings.auto_retrain_policy = "after_each_start"` was chosen from 2025 (development) only, where it is lowest for
+  all three families under the live-rule replay. The margin over weekly is far inside the bootstrap CIs.
 
 ## 6. Prospective ledger
 
@@ -244,6 +302,10 @@ data cutoff is before the game date. Production timing comes from promotion even
 * Predictions go to `pitch_predictions` with context `prospective`. They are idempotent and are never back-filled with
   a later model.
 * Metrics are at `GET /api/pitchers/{pid}/prospective`, CLI `pitchiq prospective`, and job `prospective_ledger`.
+  Each model's rows are scored on that model's own classes. A label outside them (e.g. a new pitch type that feature
+  rebuilds map to a class the model lacks) is stored with `prob_actual` 0, charged the clipped log loss and counted in
+  `n_actual_outside_model_classes` (plus `representable_only` metrics). The `all` aggregate uses the union of the
+  models' classes with probability 0 for a class a model does not output.
 * Current state on the real DB: 97 games checked, 0 recorded, because every ingested game is older than every
   production model. The ledger fills as 2027 starts are ingested. That is the first evidence no decision has seen.
 
@@ -257,7 +319,7 @@ data cutoff is before the game date. Production timing comes from promotion even
 
 ## Tests
 
-`backend/tests/test_np_refit.py` has 20 tests, run offline on the fixture DB. Registry changes happen in a transaction
+`backend/tests/test_np_refit.py` has 25 tests, run offline on the fixture DB. Registry changes happen in a transaction
 that is rolled back, with a throwaway MLflow store. They cover:
 
 * roles
@@ -272,11 +334,18 @@ that is rolled back, with a throwaway MLflow store. They cover:
 * rollback and alias moves
 * policy due rules
 * retrain and `after_ingest`
-* the policy replay (manual equals a single fit)
+* the policy replay simulating the live `policy_due` rule (weekly = 7 days + a new start, every_6_starts counted
+  across the offseason, no season-start refit, manual = the single initial fit for both seasons)
+* the challenge's in-sample flags when the default falls back to a refit trained on the pitches
+* simulator support (`ood_report.training_rows`) equal to the refit's training set
+* model comparison including the production refit
+* prospective scoring with a label outside the model's classes and with differing class lists
+* the dev_ece gate detail matching the calibration state, MLflow `split_policy` / `evaluation_roles` tags
+* the benchmark job label (no "locked test")
 * the prospective ledger (trained-before rule, exact probabilities, idempotence)
 * the API
 
-Full suite: 80 passed with `PITCHIQ_DATABASE_URL=postgresql+psycopg://pitchiq:pitchiq@localhost:5432/pitchiq_test`.
+Full suite: 98 passed with `PITCHIQ_DATABASE_URL=postgresql+psycopg://pitchiq:pitchiq@localhost:5432/pitchiq_test`.
 
 ## Limitations
 
@@ -290,3 +359,8 @@ Full suite: 80 passed with `PITCHIQ_DATABASE_URL=postgresql+psycopg://pitchiq:pi
   Changing them is a protocol change and should be recorded.
 * With only 4 classes and single-pitcher data, CH/SI recall stays near zero for every family and policy. This is a
   modelling limitation that the protocol does not fix.
+* The replay checks the policy once per calendar day before that day's game. Live, the check runs whenever the
+  ingestion job runs (`after_ingest`), so a live weekly schedule can drift from the replay's by however late
+  ingestion happens. The replay's `manual` assumes no operator trigger at all.
+* Review fixes after commit 023a0f9: replay runs 30-35 (old schedule) and promotion event 5's dev_ece detail text are
+  kept as historical records and superseded by runs 36-41 and gate event 6.

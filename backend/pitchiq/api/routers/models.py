@@ -142,9 +142,21 @@ class ComparePitch(BaseModel):
 
 @router.post("/pitchers/{pid}/models/compare")
 def compare_models(pid: int, body: ComparePitch, db: Session = Depends(get_db)):
-    """Every model family's prediction for the same situation (historical pitch or simulator state)."""
+    """Every model family's prediction for the same situation (historical pitch or simulator state).
+
+    Uses the newest model per family including deployment refits / scheduled retrains (the production model is
+    always included). For a historical pitch, `training_data_includes_game` says whether the model saw that game."""
+    from ...ml.lifecycle import data_cutoff, training_includes
+    from ...models import Pitch
+    fams = registry.latest_by_family(db, pid, include_lifecycle=True)
+    prod = registry.promoted(db, pid)
+    items = sorted(fams.items())
+    if prod is not None and all(e.model_version != prod.model_version for _, e in items):
+        items.append((prod.model_family, prod))
+    gdate = db.scalar(select(Pitch.game_date).where(Pitch.pitch_uid == body.pitch_uid)) \
+        if body.pitch_uid is not None else None
     out = []
-    for fam, e in sorted(registry.latest_by_family(db, pid).items()):
+    for fam, e in items:
         m = registry.load_model(e)
         if body.pitch_uid is not None:
             feats = db.scalar(select(PrePitchState.features).where(PrePitchState.pitch_uid == body.pitch_uid))
@@ -156,7 +168,11 @@ def compare_models(pid: int, body: ComparePitch, db: Session = Depends(get_db)):
         ms = (time.perf_counter() - t) * 1000
         top = e.classes[int(P[0].argmax())]
         ex = m.explain(X.iloc[[0]]) if len(mix) == 1 else None
+        cut = data_cutoff(db, e)
         out.append({"model_version": e.model_version, "family": fam, "status": e.status, "inference_ms": ms,
+                    "training_scope": (e.config or {}).get("training_scope") or "season_split",
+                    "data_cutoff": str(cut) if cut else None,
+                    "training_data_includes_game": training_includes(db, e, gdate) if gdate else None,
                     "predictions": sorted([{"pitch": c, "pitch_name": pitch_name(c), "probability": float(P[0, j])}
                                            for j, c in enumerate(e.classes)], key=lambda d: -d["probability"]),
                     "attribution": summarize_attribution(ex[0], top, e.classes) if ex else None})

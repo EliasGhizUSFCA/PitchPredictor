@@ -94,7 +94,9 @@ def record_prospective(session: Session, pitcher_id: int) -> dict:
             rows.append(dict(pitch_uid=int(te.pitch_uid.iloc[i]), model_version=v, context=CONTEXT,
                              input_features={k: _py(te[k].iloc[i]) for k in feat_cols if k in te},
                              probabilities=probs, top_pitch=top, actual_pitch=actual, is_correct_top1=top == actual,
-                             prob_actual=probs.get(actual), revealed_at=datetime.now(timezone.utc)))
+                             # a label outside the model's classes got probability 0 (counted as
+                             # 'outside_model_classes' by prospective_metrics)
+                             prob_actual=probs.get(actual, 0.0), revealed_at=datetime.now(timezone.utc)))
         for i in range(0, len(rows), 1000):
             session.execute(insert(PitchPrediction).values(rows[i:i + 1000]))
         rep["recorded_games"] += 1
@@ -118,15 +120,35 @@ def prospective_metrics(session: Session, pitcher_id: int) -> dict:
         return {**base, "n": 0, "summary": None, "by_model": [],
                 "note": "No prospective predictions yet: no ingested game is newer than a production model's "
                         "creation date and data cutoff."}
-    out = []
     df = pd.DataFrame(rows, columns=["model_version", "pitch_uid", "probabilities", "actual", "created_at"])
-    for v, part in [("all", df)] + list(df.groupby("model_version")):
-        classes = list(part.probabilities.iloc[0].keys())
-        P = np.array([[p[c] for c in classes] for p in part.probabilities])
-        y = np.array([classes.index(a) for a in part.actual])
-        out.append({"model_version": v, **summarize(P, y, classes),
-                    "ece": reliability(P, y, classes)["ece_top_label"]})
+    model_classes = {v: list(session.get(ModelRegistry, v).classes) for v in df.model_version.unique()}
+    lists = list(model_classes.values())
+    same = len({tuple(c) for c in lists}) == 1
+    union = lists[0] if same else lists[0] + sorted({c for cl in lists for c in cl} - set(lists[0]))
+    out = [_score(df, union, "all", same_classes=same)]
+    for v, part in df.groupby("model_version"):
+        out.append(_score(part, model_classes[v], v))
     return {**base, "n": int(len(df)), "summary": out[0], "by_model": out[1:]}
+
+
+def _score(part: pd.DataFrame, classes: list[str], name: str, same_classes: bool = True) -> dict:
+    """Score rows on `classes` (a model's own classes, or the union for the aggregate). A missing class column is a
+    probability of 0; an actual label outside `classes` is kept as an extra zero-probability column, so the log loss
+    charges it the clipped maximum and it is also counted explicitly."""
+    outside = sorted(set(part.actual) - set(classes))
+    cols = list(classes) + outside
+    P = np.array([[float(p.get(c, 0.0)) for c in cols] for p in part.probabilities])
+    y = np.array([cols.index(a) for a in part.actual])
+    inside = ~np.isin(part.actual.to_numpy(), outside)
+    d = {"model_version": name, **summarize(P, y, cols), "ece": reliability(P, y, cols)["ece_top_label"],
+         "classes": list(classes), "n_actual_outside_model_classes": int((~inside).sum()),
+         "actual_labels_outside_model_classes": outside}
+    if outside and inside.any():
+        d["representable_only"] = summarize(P[inside], y[inside], cols)
+    if not same_classes:
+        d["note"] = ("models have different class lists: aggregate scored on their union, with 0 probability for a "
+                     "class a model does not output")
+    return d
 
 
 def _py(v):

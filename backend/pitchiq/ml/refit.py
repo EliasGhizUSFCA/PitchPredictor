@@ -153,6 +153,35 @@ def final_fit(session: Session, pitcher_id: int, selection: dict, deployment_cut
     return entry
 
 
+def evaluation_roles_tag() -> str:
+    s = get_settings()
+    return (f"development={s.development_seasons} (selection, tuning, calibration, gates); "
+            f"retrospective_viewed={s.retrospective_viewed_seasons} (previously viewed, reported only)")
+
+
+def lifecycle_split_policy(cfg: dict) -> str:
+    s = get_settings()
+    return (f"{cfg.get('training_scope')}: fit on all labeled games before {cfg.get('deployment_cutoff')} "
+            f"(data cutoff {cfg.get('data_cutoff')}, seasons {cfg.get('train_seasons_present')}); hyperparameters "
+            f"selected on rolling-origin development folds {s.dev_eval_seasons}")
+
+
+def tag_evaluation_run(run: EvaluationRun) -> None:
+    """Evaluation-role tags for rolling-dev / replay evaluation runs (their generic split_policy is season-split)."""
+    t = tracking.get_tracker()
+    rid = (run.metrics or {}).get("mlflow_run_id")
+    if not rid or not t.enabled:
+        return
+    try:
+        s = get_settings()
+        t.client.set_tag(rid, "pitchiq.evaluation_roles", evaluation_roles_tag())
+        t.client.set_tag(rid, "pitchiq.split_policy",
+                         f"{run.kind}: rolling-origin / replay over game dates (dev folds {s.dev_eval_seasons}); "
+                         f"evaluation_role={(run.metrics or {}).get('evaluation_role') or run.split}")
+    except Exception as e:  # noqa: BLE001
+        log(logger, "mlflow_mirror_failed", op="evaluation_role_tags", error=f"{type(e).__name__}: {e}"[:500])
+
+
 def _tag_run(entry: ModelRegistry) -> None:
     """Extra MLflow tags/metrics for lifecycle models (best effort; Postgres is the record)."""
     t = tracking.get_tracker()
@@ -165,6 +194,9 @@ def _tag_run(entry: ModelRegistry) -> None:
             if cfg.get(k) is not None:
                 t.client.set_tag(rid, f"pitchiq.{k}", str(cfg[k]))
         t.client.set_tag(rid, "pitchiq.evaluation_protocol", "rolling_origin_development")
+        # the generic season-split tag set by mirror_model_entry does not describe a lifecycle fit
+        t.client.set_tag(rid, "pitchiq.split_policy", lifecycle_split_policy(cfg))
+        t.client.set_tag(rid, "pitchiq.evaluation_roles", evaluation_roles_tag())
         t.client.log_metric(rid, "n_train", float(cfg["n_train"]))
         t.client.log_metric(rid, "n_train_games", float(cfg["n_train_games"]))
         for k, v in (entry.validation_metrics or {}).items():
@@ -203,6 +235,7 @@ def store_dev_run(session: Session, entry: ModelRegistry, res: DevResult, recipe
     session.add(run)
     session.flush()
     tracking.mirror_evaluation(run, entry)
+    tag_evaluation_run(run)
     session.flush()
     lc = lifecycle.lifecycle_row(session, entry.model_version)
     if lc is not None:

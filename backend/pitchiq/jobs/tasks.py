@@ -153,7 +153,7 @@ DESCRIPTIONS = {
     "build_video_library": "Build Chris Sale Video Library (discover + match official pitch videos)",
     "verify_video_availability": "Check playback availability of verified clips (rate-limited)",
     "train_models": "Train + calibrate all model families (train/validation only)",
-    "benchmark": "Full held-out benchmark (locked test split)",
+    "benchmark": "Holdout benchmark on a split (test = 2026, retrospective, previously viewed)",
     "walk_forward": "Walk-forward expanding-window evaluation",
     "ablation": "Feature-group ablation on validation",
     "full_refresh": "Ingest -> feeds -> validate -> features -> video library",

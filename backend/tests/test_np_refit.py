@@ -181,6 +181,9 @@ def test_lifecycle_models_are_mirrored_with_cutoff_tags(world, tracker):
         assert r.data.tags["pitchiq.data_cutoff"] == e.config["data_cutoff"]
         assert r.data.metrics["n_train"] == e.config["n_train"]
         assert r.data.metrics["validation_log_loss"] == pytest.approx(e.validation_metrics["log_loss"])
+        # the season-split tag set by the generic mirror is replaced: these fits include 2026
+        assert r.data.tags["pitchiq.split_policy"].startswith("deployment_refit: fit on all labeled games before")
+        assert "retrospective_viewed=[2026]" in r.data.tags["pitchiq.evaluation_roles"]
         run = s.get(EvaluationRun, s.get(ModelLifecycle, e.model_version).dev_evaluation_run_id)
         assert tracker.client.get_run(run.metrics["mlflow_run_id"]).data.tags["pitchiq.split"] == "development"
 
@@ -203,6 +206,10 @@ def test_gated_promotion_keeps_previous_production(world, tracker):
     assert prod.model_version == promo["model_version"] and lifecycle.is_lifecycle_model(prod)
     assert s.get(ModelRegistry, world["legacy"]).status == "previous_production"
     names = {g["gate"] for g in promo["gates"]["gates"]}
+    ece = next(g for g in promo["gates"]["gates"] if g["gate"] == "dev_ece")
+    applied = prod.validation_metrics["calibration_applied"]
+    assert ("chronologically calibrated" in ece["detail"]) == applied and ("raw" in ece["detail"]) == (not applied)
+    assert ece["value"] == pytest.approx(prod.validation_metrics["raw_ece" if not applied else "chrono_calibrated_ece"])
     assert names == {"artifact_checksum", "probabilities_normalized", "min_training_samples", "dev_ece",
                      "dev_log_loss_vs_production", "data_not_older_than_production", "development_only_provenance"}
     # the legacy production recipe was scored on the same rolling folds for the comparison gate
@@ -228,6 +235,57 @@ def test_historical_defaults_use_a_model_trained_before_the_game(world):
     assert r["model_version"] == world["legacy"] and r["training_data_includes_game"] is False
     ch = create_challenge(s, PID, 3, seed=1)
     assert ch.model_version == world["legacy"]
+
+
+def test_challenge_reports_in_sample_when_model_was_trained_on_the_pitches(world):
+    from pitchiq.challenge import challenge_stats, next_attempt, reveal
+    s = world["s"]
+    from pitchiq.challenge import create_challenge
+    test_ch = create_challenge(s, PID, 2, seed=3)  # 2026: the legacy model's data ended in 2025
+    st = challenge_stats(s, test_ch.challenge_id)
+    assert st["model_trained_on_these_pitches"] is False and st["evaluation_sample"] == "out-of-sample"
+    # 2023-24: no model's data ended before this split, so the default falls back to production (a refit on it)
+    ch = create_challenge(s, PID, 2, seed=3, split="train")
+    assert lifecycle.is_lifecycle_model(s.get(ModelRegistry, ch.model_version))
+    view = next_attempt(s, ch.challenge_id)
+    assert view["prediction"]["training_data_includes_game"] is True
+    assert view["prediction"]["evaluation_sample"].startswith("in-sample")
+    reveal(s, view["attempt_id"])
+    st = challenge_stats(s, ch.challenge_id)
+    assert st["model_trained_on_these_pitches"] is True and st["in_sample_pitches"] == 1
+    assert "in-sample" in st["note"]
+
+
+def test_simulator_support_is_the_refit_training_set(world):
+    from pitchiq.ml import inference
+    s = world["s"]
+    prod = registry.promoted(s, PID)
+    lc = s.get(ModelLifecycle, prod.model_version)
+    assert lc is not None
+    inference._train_frame_cached.cache_clear()
+    try:
+        mix, _ = inference.sim_feature_mixture(s, prod, inference.SimState())
+        rep = inference.ood_report(s, prod, mix[0][1])
+        assert rep["training_rows"] == lc.n_train_samples
+        legacy = s.get(ModelRegistry, world["legacy"])
+        n_train_split = len(__import__("pitchiq.features.store", fromlist=["x"]).load_feature_frame(
+            s, PID, ["train"], legacy.feature_version))
+        assert inference.ood_report(s, legacy, mix[0][1])["training_rows"] == n_train_split
+    finally:
+        inference._train_frame_cached.cache_clear()
+
+
+def test_compare_includes_production_refit(world):
+    from pitchiq.api.routers.models import ComparePitch, compare_models
+    from pitchiq.models import PrePitchState
+    s = world["s"]
+    prod = registry.promoted(s, PID)
+    uid = s.scalars(select(PrePitchState.pitch_uid).where(PrePitchState.split == "test",
+                                                          PrePitchState.label.is_not(None))).first()
+    out = compare_models(PID, ComparePitch(pitch_uid=uid), s)
+    row = next(r for r in out if r["model_version"] == prod.model_version)
+    assert row["training_scope"] in ("deployment_refit", "scheduled_retrain")
+    assert row["training_data_includes_game"] is True
 
 
 def test_failing_gate_leaves_candidate_and_records_results(world, mp):
@@ -330,15 +388,38 @@ def test_after_ingest_runs_ledger_then_policy_check(world, mp):
 
 
 # ------------------------------------------------------------------ replay
-def test_policy_cutoffs():
-    games = pd.DataFrame({"game_date": [date(2025, 4, 1) + timedelta(days=5 * i) for i in range(13)]})
-    after = replay.policy_cutoffs("after_each_start", games)
-    assert after == list(games.game_date)
-    assert set(replay.policy_cutoffs("manual", games)) == {date(2025, 4, 1)}
-    six = replay.policy_cutoffs("every_6_starts", games)
-    assert six[5] == date(2025, 4, 1) and six[6] == games.game_date[6] and six[12] == games.game_date[12]
-    wk = replay.policy_cutoffs("weekly", games)
-    assert all(c <= d and c.weekday() in (0, date(2025, 4, 1).weekday()) for c, d in zip(wk, games.game_date))
+def _games(dates):
+    return pd.DataFrame({"game_pk": range(len(dates)), "game_date": dates, "season": [d.year for d in dates]})
+
+
+def test_replay_simulates_the_live_policy_rule():
+    # 2025: 8 starts every 5 days from Apr 1; 2026: 4 starts every 5 days from Apr 1
+    d25 = [date(2025, 4, 1) + timedelta(days=5 * i) for i in range(8)]
+    d26 = [date(2026, 4, 1) + timedelta(days=5 * i) for i in range(4)]
+    g = _games([date(2024, 9, 1)] + d25 + d26)
+    start, end = d25[0], d26[-1]
+    cuts, ev = replay.simulate_policy("after_each_start", g, start, end)
+    assert cuts[0] == start and cuts[1:] == [d + timedelta(days=1) for d in (d25 + d26)[:-1]]
+    # manual: no operator trigger -> the initial deployment serves throughout, no free season-start refit
+    cuts, ev = replay.simulate_policy("manual", g, start, end)
+    assert set(cuts) == {start} and [e["kind"] for e in ev] == ["initial_fit"]
+    # every_6_starts counts starts since the deployed cutoff, across the offseason
+    cuts, ev = replay.simulate_policy("every_6_starts", g, start, end)
+    refits = [e["date"] for e in ev if e["kind"] == "refit"]
+    # day after the 6th new start; then 2 late-2025 + 4 2026 starts reach 6 only after the last replayed game,
+    # so all of 2026 is served by the mid-2025 refit (no season-start refit)
+    assert refits == [d25[5] + timedelta(days=1)]
+    assert cuts[-4:] == [d25[5] + timedelta(days=1)] * 4
+    # weekly: >= 7 days since the last fit AND >= 1 new start, checked daily (refit.policy_due)
+    cuts, ev = replay.simulate_policy("weekly", g, start, end)
+    last, cutoff = start, date(2024, 9, 1)
+    for e in [e for e in ev if e["kind"] == "refit"]:
+        assert (e["date"] - last).days >= 7
+        assert any(cutoff < d < e["date"] for d in g.game_date)
+        last, cutoff = e["date"], max(d for d in g.game_date if d < e["date"])
+    assert d26[0] not in [e["date"] for e in ev]  # first 2026 refit needs 7 days since the 2025 fit AND a new start
+    with pytest.raises(ValueError):
+        replay.simulate_policy("hourly", g, start, end)
 
 
 def test_policy_replay_stores_runs_and_manual_matches_a_single_fit(world):
@@ -350,14 +431,23 @@ def test_policy_replay_stores_runs_and_manual_matches_a_single_fit(world):
     assert r26.metrics["evaluation_label"] == "retrospective (previously viewed)" and r26.split == "test"
     pol = r26.metrics["policies"]
     assert set(pol) == set(refit.POLICIES)
-    assert pol["manual"]["n_refits"] == 0 and pol["after_each_start"]["n_refits"] == 1
+    assert "policy_due" in r26.metrics["simulation"] and r26.metrics["replay_seasons"] == [2025, 2026]
     df = protocol.load_dated_frame(s, PID)
-    te = df[df.game_season == 2026]
-    tr = df[df.game_date < te.game_date.min()]
+    n26 = df[df.game_season == 2026].game_pk.nunique()
+    n25 = df[df.game_season == 2025].game_pk.nunique()
+    assert pol["manual"]["n_refits"] == 0 and pol["manual"]["n_models_used"] == 1
+    # after_each_start refits the day after every start: the 2026 refits follow the last 2025 start and 2026 starts
+    assert pol["after_each_start"]["n_refits"] == n26 and pol["after_each_start"]["n_models_used"] == n26
+    assert r25.metrics["policies"]["after_each_start"]["n_refits"] == n25 - 1
+    # manual = the deployment at the first replayed (2025) game serves both seasons
+    first_25 = df[df.game_season == 2025].game_date.min()
+    tr = df[df.game_date < first_25]
     params = s.get(ModelLifecycle, r26.model_version).selected_params
     m = protocol.make_model("logreg", get_classes(s, PID), params).fit(tr, tr["label"])
-    assert pol["manual"]["log_loss"] == pytest.approx(log_loss(m.predict_proba(te, calibrated=False),
-                                                               m.y_index(te["label"])))
+    for season, r in ((2025, r25), (2026, r26)):
+        te = df[df.game_season == season]
+        assert r.metrics["policies"]["manual"]["log_loss"] == pytest.approx(
+            log_loss(m.predict_proba(te, calibrated=False), m.y_index(te["label"])))
 
 
 # ------------------------------------------------------------------ prospective ledger
@@ -392,6 +482,26 @@ def test_prospective_ledger_uses_only_models_trained_before_the_game(world):
     met = prospective_metrics(s, PID)
     y = np.array([cls.index(a) for a in te.label])
     assert met["n"] == len(te) and met["summary"]["log_loss"] == pytest.approx(log_loss(P, y))
+
+
+def test_prospective_scoring_handles_labels_outside_model_classes():
+    from pitchiq.ml.prospective import _score
+    part = pd.DataFrame({"probabilities": [{"FF": 0.7, "SL": 0.3}, {"FF": 0.2, "SL": 0.8}, {"FF": 0.5, "SL": 0.5}],
+                         "actual": ["FF", "SL", "XX"]})
+    d = _score(part, ["FF", "SL"], "m")
+    assert d["n"] == 3 and d["n_actual_outside_model_classes"] == 1
+    assert d["actual_labels_outside_model_classes"] == ["XX"]
+    assert d["representable_only"]["n"] == 2
+    assert d["representable_only"]["log_loss"] == pytest.approx(-(np.log(0.7) + np.log(0.8)) / 2)
+    assert d["log_loss"] > d["representable_only"]["log_loss"]  # the unrepresentable pitch is charged, not dropped
+    # union of different class lists (missing columns = probability 0)
+    d = _score(part.iloc[:2], ["FF", "SL", "CH"], "all", same_classes=False)
+    assert d["n_actual_outside_model_classes"] == 0 and "union" in d["note"]
+
+
+def test_benchmark_job_label_is_retrospective():
+    from pitchiq.jobs.tasks import DESCRIPTIONS
+    assert "locked" not in DESCRIPTIONS["benchmark"] and "retrospective" in DESCRIPTIONS["benchmark"]
 
 
 # ------------------------------------------------------------------ API (read-only on the committed state)

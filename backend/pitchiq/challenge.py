@@ -11,11 +11,29 @@ from sqlalchemy.orm import Session
 from .ml import registry
 from .ml.inference import predict_historical
 from .ml.metrics import brier, confusion, log_loss, reliability, summarize, wilson
-from .models import (Batter, ChallengeAttempt, Pitch, PitchPrediction, PredictionChallenge, PrePitchState,
-                     VideoAsset)
+from .models import (Batter, ChallengeAttempt, ModelRegistry, Pitch, PitchPrediction, PredictionChallenge,
+                     PrePitchState, VideoAsset)
 from .pitch_types import pitch_name, result_category
 
 STRATEGIES = {"natural", "balanced_pitch_type", "balanced_count", "lhb", "rhb", "innings", "pitch_count_range"}
+
+
+def in_sample_flags(session: Session, model_version: str, pitch_uids: list[int]) -> dict:
+    """Whether the model's training data includes these pitches' games (scores on them are then in-sample).
+
+    Lifecycle refits are trained on every season up to their deployment cutoff, so a challenge on an early split
+    without an out-of-sample model falls back to a model trained on those very pitches; this makes that visible."""
+    from .ml.lifecycle import data_cutoff
+    e = session.get(ModelRegistry, model_version)
+    cut = data_cutoff(session, e) if e is not None else None
+    if cut is None or not pitch_uids:
+        return {"training_data_includes_game": None, "in_sample_pitches": None, "evaluation_sample": "unknown",
+                "model_data_cutoff": str(cut) if cut else None}
+    dates = session.scalars(select(Pitch.game_date).where(Pitch.pitch_uid.in_(pitch_uids))).all()
+    k = sum(d <= cut for d in dates)
+    return {"training_data_includes_game": k > 0, "in_sample_pitches": int(k),
+            "evaluation_sample": "in-sample (model trained on these pitches)" if k == len(dates) and k else
+            "partly in-sample" if k else "out-of-sample", "model_data_cutoff": str(cut)}
 
 
 def _eligible(session: Session, pitcher_id: int, split: str, feature_version: str) -> pd.DataFrame:
@@ -161,6 +179,7 @@ def attempt_view(session: Session, att: ChallengeAttempt, pred: dict | None = No
             "predictions": sorted([{"pitch": k, "pitch_name": pitch_name(k), "probability": v}
                                    for k, v in pp.probabilities.items()], key=lambda d: -d["probability"]),
             "attribution": pp.attribution, "inference_ms": pp.inference_ms, "trace_id": pp.trace_id,
+            **in_sample_flags(session, pp.model_version, [att.pitch_uid]),
         },
         "trace": pred["trace"] if pred else None,
         # The video reference is withheld until reveal so the clip cannot be opened before the prediction.
@@ -248,6 +267,13 @@ def challenge_stats(session: Session, challenge_id: int) -> dict:
             "seed": ch.seed, "size": ch.size, "tested": len(rows), "classes": classes,
             "natural_frequencies": ch.sampling_strategy not in ("balanced_pitch_type", "balanced_count"),
             "note": "Interactive subset; official performance comes from the full holdout benchmark."}
+    flags = in_sample_flags(session, ch.model_version, [att.pitch_uid for att, _ in rows] or list(ch.pitch_uids))
+    base.update(model_trained_on_these_pitches=flags["training_data_includes_game"],
+                in_sample_pitches=flags["in_sample_pitches"], evaluation_sample=flags["evaluation_sample"],
+                model_data_cutoff=flags["model_data_cutoff"])
+    if flags["training_data_includes_game"]:
+        base["note"] += (" The model's training data includes these pitches' games, so its accuracy, log loss and "
+                         "calibration here are in-sample and optimistic.")
     if not rows:
         return base
     P = np.array([[pp.probabilities.get(c, 0.0) for c in classes] for _, pp in rows])

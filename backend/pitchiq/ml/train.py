@@ -1,6 +1,6 @@
 """Training with chronological splits. Hyperparameters + calibration use TRAIN and VALIDATION only.
 
-The locked test split is never read here.
+The test split (2026, retrospective, previously viewed) is never read here.
 """
 from __future__ import annotations
 

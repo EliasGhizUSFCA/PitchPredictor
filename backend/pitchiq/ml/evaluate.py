@@ -1,4 +1,5 @@
-"""Automated benchmarks: locked holdout, walk-forward, and feature ablation (validation only)."""
+"""Automated benchmarks: holdout (test = 2026, retrospective, previously viewed), walk-forward, and feature ablation
+(validation only)."""
 from __future__ import annotations
 
 import logging
@@ -154,7 +155,7 @@ def walk_forward(session: Session, pitcher_id: int, family: str = "lightgbm", sp
 
 
 def ablation(session: Session, pitcher_id: int, family: str = "lightgbm", progress: Callable | None = None) -> EvaluationRun:
-    """Drop-one-group ablation scored on VALIDATION (feature selection must not touch the locked test set)."""
+    """Drop-one-group ablation scored on VALIDATION (feature selection must not use the 2026 retrospective season)."""
     entry = registry.latest_by_family(session, pitcher_id)[family]
     base = registry.load_model(entry)
     classes = entry.classes

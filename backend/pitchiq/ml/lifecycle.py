@@ -8,7 +8,8 @@ Gates are fixed in `Settings` (gate_*) and only read development evidence:
 * ``artifact_checksum`` - the artifact loads and its SHA-256 matches the registry.
 * ``probabilities_normalized`` - on every labeled development pitch: finite, in [0, 1], rows sum to 1 (tolerance).
 * ``min_training_samples`` - the fit used at least `gate_min_training_samples` labeled pitches.
-* ``dev_ece`` - top-label ECE of the recipe's chronologically calibrated rolling development predictions.
+* ``dev_ece`` - top-label ECE of the deployed output on the recipe's rolling development predictions (raw if the
+  calibration rule left calibration off, else chronologically calibrated).
 * ``dev_log_loss_vs_production`` - candidate dev rolling log loss <= production's (same protocol, same folds) +
   `gate_max_dev_log_loss_regression`.
 * ``data_not_older_than_production`` - the candidate's data cutoff is not earlier than production's.
@@ -171,8 +172,11 @@ def evaluate_gates(session: Session, entry: ModelRegistry, production: ModelRegi
     gate("min_training_samples", n_train >= th["min_training_samples"], n_train, th["min_training_samples"])
 
     dev = ensure_dev_evaluation(session, entry)
+    applied = dev.get("calibration_applied")
+    kind = ("chronologically calibrated" if applied else "raw, calibration_applied=false" if applied is False
+            else "calibration state not recorded")
     gate("dev_ece", dev["ece"] <= th["max_dev_ece"], dev["ece"], th["max_dev_ece"],
-         "top-label ECE, chronologically calibrated rolling development predictions")
+         f"top-label ECE of the deployed output on rolling development predictions ({kind})")
 
     if production is None:
         gate("dev_log_loss_vs_production", True, dev["log_loss"], None, "no production model to compare against")

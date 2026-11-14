@@ -43,7 +43,7 @@ class Settings(BaseSettings):
 
     # Promotion gates. Fixed before any gated promotion was run; changing them is a protocol change.
     gate_max_dev_log_loss_regression: float = 0.005  # candidate dev log loss <= production dev log loss + this
-    gate_max_dev_ece: float = 0.05  # top-label ECE of chronologically calibrated dev predictions
+    gate_max_dev_ece: float = 0.05  # top-label ECE of the deployed output (raw or chrono-calibrated) on dev folds
     gate_min_training_samples: int = 2000
     gate_prob_tolerance: float = 1e-6
     # Scheduled retraining checked automatically after each feature rebuild (after_each_start | every_6_starts |

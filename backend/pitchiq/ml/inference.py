@@ -218,11 +218,31 @@ def _history_cached(pitcher_id: int, as_of: date, classes: tuple, _key: str):
     return history_as_of(df, list(classes), as_of), velo
 
 
+def _fit_cutoff(session: Session, entry: ModelRegistry) -> date | None:
+    """Deployment cutoff of a lifecycle model (fit on all labeled games dated before it); None for season-split."""
+    from ..models_lifecycle import ModelLifecycle
+    lc = session.get(ModelLifecycle, entry.model_version)
+    return lc.deployment_cutoff if lc is not None else None
+
+
+def _train_frame(session: Session, entry: ModelRegistry) -> pd.DataFrame:
+    return _train_frame_cached(entry.pitcher_id, entry.feature_version, entry.model_version,
+                               _fit_cutoff(session, entry))
+
+
 @lru_cache(maxsize=4)
-def _train_frame_cached(pitcher_id: int, feature_version: str, _key: str) -> pd.DataFrame:
+def _train_frame_cached(pitcher_id: int, feature_version: str, _key: str, fit_before: date | None) -> pd.DataFrame:
+    """The labeled rows the model was fit on (support / OOD diagnostics and unknown-previous-pitch weights).
+
+    Lifecycle models (deployment refits / scheduled retrains, `fit_before` = deployment cutoff) were fit on every
+    labeled pitch from games dated before it; legacy season-split models on the "train" split."""
     from ..db import session_scope
     with session_scope() as s:
-        return load_feature_frame(s, pitcher_id, ["train"], feature_version)
+        if fit_before is None:
+            return load_feature_frame(s, pitcher_id, ["train"], feature_version)
+        from .protocol import load_dated_frame
+        df = load_dated_frame(s, pitcher_id, feature_version)
+        return df[df["game_date"] < fit_before].reset_index(drop=True)
 
 
 def default_as_of(session: Session, pitcher_id: int) -> date:
@@ -234,11 +254,11 @@ def default_as_of(session: Session, pitcher_id: int) -> date:
     return d or date.today()
 
 
-def _unknown_prev_distribution(pitcher_id: int, feature_version: str, key: str, count_str: str,
+def _unknown_prev_distribution(session: Session, entry: ModelRegistry, count_str: str,
                                max_combos: int = 12) -> list[tuple[float, str, str, int]]:
     """Empirical joint of (prev1_type, prev1_result, prev1_same_pa) in training rows with this count and
     at least one prior pitch. Used to marginalize the model over an unknown previous pitch."""
-    tr = _train_frame_cached(pitcher_id, feature_version, key)
+    tr = _train_frame(session, entry)
     sub = tr[(tr["count_str"] == count_str) & (tr["pitch_count_before"] > 0)]
     if len(sub) < 20:
         sub = tr[tr["pitch_count_before"] > 0]
@@ -288,8 +308,7 @@ def sim_feature_mixture(session: Session, entry: ModelRegistry, state: SimState)
         notes["imputed"].append("previous pitch velocity = pitcher's historical mean for that pitch type")
     if state.pitch_count_before > 0 and not state.previous_pitches:
         mix = []
-        combos = _unknown_prev_distribution(pitcher_id, entry.feature_version, entry.model_version,
-                                            f"{state.balls}-{state.strikes}")
+        combos = _unknown_prev_distribution(session, entry, f"{state.balls}-{state.strikes}")
         for w, t, r, same in combos:
             mix.append((w, build([PrevPitch(type=t, result=r, same_pa=bool(same))])))
         tot = sum(w for w, _ in mix)
@@ -305,7 +324,7 @@ def sim_feature_mixture(session: Session, entry: ModelRegistry, state: SimState)
 
 
 def ood_report(session: Session, entry: ModelRegistry, feats: dict) -> dict:
-    tr = _train_frame_cached(entry.pitcher_id, entry.feature_version, entry.model_version)
+    tr = _train_frame(session, entry)
     warnings = []
     same_cell = int(((tr["stand"] == feats["stand"]) & (tr["count_str"] == feats["count_str"])).sum())
     near_pc = int(((tr["pitch_count_before"] - feats["pitch_count_before"]).abs() <= 5).sum())
@@ -323,7 +342,8 @@ def ood_report(session: Session, entry: ModelRegistry, feats: dict) -> dict:
         warnings.append("Pitch count exceeds anything in the training data")
     if (feats.get("times_through_order") or 0) > tr["times_through_order"].max():
         warnings.append("Times through order exceeds training data")
-    return {"training_rows": len(tr), "same_hand_and_count": same_cell, "pitch_count_within_5": near_pc,
+    return {"training_rows": len(tr), "training_support": "lifecycle fit set (games before the deployment cutoff)"
+            if "game_date" in tr else "train split", "same_hand_and_count": same_cell, "pitch_count_within_5": near_pc,
             "same_inning": inn, "similar_situations": exact, "out_of_distribution": bool(warnings),
             "warnings": warnings}
 
