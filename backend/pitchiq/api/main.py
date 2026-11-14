@@ -54,3 +54,7 @@ app.include_router(_lifecycle.router, prefix="/api")
 from .routers import aging as _aging  # noqa: E402  (aging dataset)
 
 app.include_router(_aging.router, prefix="/api")
+
+from .routers import video_cv as _video_cv  # noqa: E402  (automatic video alignment, Mode A)
+
+app.include_router(_video_cv.router, prefix="/api")

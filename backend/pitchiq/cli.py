@@ -28,6 +28,10 @@ def main(argv=None):
     v = sub.add_parser("videos", help="Build Chris Sale Video Library")
     v.add_argument("--max-games", type=int)
     v.add_argument("--force", action="store_true")
+    av = sub.add_parser("align-videos", help="Automatic pre-pitch alignment of licensed local clips (OpenCV/FFmpeg)")
+    av.add_argument("--force", action="store_true", help="re-run even if up to date; also replaces user corrections")
+    av.add_argument("--asset-ids", type=int, nargs="*")
+    av.add_argument("--limit", type=int)
     va = sub.add_parser("verify-videos")
     va.add_argument("--limit", type=int, default=50)
     t = sub.add_parser("train")
@@ -138,6 +142,9 @@ def main(argv=None):
             from .video.discovery import build_video_library, coverage
             out(build_video_library(s, pid, max_games=args.max_games, force=args.force))
             out(coverage(s, pid))
+        elif args.cmd == "align-videos":
+            from .video.align_service import align_videos
+            out(align_videos(s, pid, force=args.force, asset_ids=args.asset_ids, limit=args.limit))
         elif args.cmd == "verify-videos":
             from .video.discovery import verify_availability
             out(verify_availability(s, pid, limit=args.limit))

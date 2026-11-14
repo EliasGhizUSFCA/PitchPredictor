@@ -72,8 +72,10 @@ def test_licensed_local_provider_and_media_endpoint(session, api, tmp_path):
     session.commit()
     a = session.scalars(select(VideoAsset).where(VideoAsset.source_provider == "licensed_local")).first()
     assert a.match_confidence == "exact_verified" and a.rights_or_permission_status == "licensed:TEST-LICENSE-1"
-    r = api.get(f"/api/videos/{a.video_asset_id}/media")
-    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4"
+    # not aligned -> no pre-pitch segment (409); full clip only after a reveal (403 now)
+    assert a.synchronization_status == "unaligned"
+    assert api.get(f"/api/videos/{a.video_asset_id}/media").status_code == 409
+    assert api.get(f"/api/videos/{a.video_asset_id}/media?segment=full").status_code == 403
     ext = session.scalars(select(VideoAsset).where(VideoAsset.playback_method == "external_link")).first()
     assert api.get(f"/api/videos/{ext.video_asset_id}/media").status_code == 404
     session.delete(a)

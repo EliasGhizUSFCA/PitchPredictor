@@ -181,3 +181,17 @@ def t_aging_etl(session, params, ctx):
 TASKS["aging_etl"] = t_aging_etl
 DESCRIPTIONS["aging_etl"] = ("MLB-wide longitudinal pitcher-season dataset for aging analysis (Savant leaderboards, "
                              "birth dates, consecutive-season observations, cohorts) + target pitcher's career pitches")
+
+
+def t_align_videos(session, params, ctx):
+    """Automatic pre-pitch alignment of licensed_local clips (pitchiq.video.align_service). params: pitcher_id,
+    force (also replaces user corrections), asset_ids, limit."""
+    from ..video.align_service import align_videos
+    return align_videos(session, _pid(params), force=bool(params.get("force", False)),
+                        asset_ids=params.get("asset_ids"), limit=params.get("limit"), progress=ctx.progress,
+                        should_cancel=ctx.cancelled)
+
+
+TASKS["align_videos"] = t_align_videos
+DESCRIPTIONS["align_videos"] = ("Automatic pre-pitch alignment of licensed local clips (OpenCV/FFmpeg: scene cuts, "
+                                "center-field view, delivery onset); low confidence stays unaligned")

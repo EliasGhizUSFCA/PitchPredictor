@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...models import Batter, Pitch, VideoAsset
 from ...pitch_types import pitch_name
+from ...video.align_service import MediaForbidden, MediaNotAligned, has_pre_pitch_segment, media_for
 from ...video.discovery import coverage
 
 router = APIRouter(tags=["videos"])
@@ -70,7 +71,12 @@ def _view(v: VideoAsset, p: Pitch, batter_name: str | None, include_labels: bool
          "rights": v.rights_or_permission_status, "synchronization_status": v.synchronization_status,
          "discovered_at": str(v.discovered_at), "last_verified_at": str(v.last_verified_at) if v.last_verified_at else None,
          "source_page_url": v.source_page_url,
-         "media_url": f"/api/videos/{v.video_asset_id}/media" if v.playback_method == "licensed_local" else None}
+         "media_url": f"/api/videos/{v.video_asset_id}/media" if v.playback_method == "licensed_local" else None,
+         # media_url serves the pre-pitch segment only; the full clip needs ?segment=full after a reveal
+         "full_media_url": f"/api/videos/{v.video_asset_id}/media?segment=full"
+         if v.playback_method == "licensed_local" else None,
+         "pre_pitch_segment_available": has_pre_pitch_segment(v), "alignment_confidence": v.alignment_confidence,
+         "pre_pitch_pause_time": v.pre_pitch_pause_time}
     if include_labels:
         d.update(pitch_type=p.pitch_type, pitch_name=pitch_name(p.pitch_type), result=p.description)
     return d
@@ -131,11 +137,16 @@ def set_alignment(vid: int, body: AlignmentIn, db: Session = Depends(get_db)):
 
 
 @router.get("/videos/{vid}/media")
-def media(vid: int, db: Session = Depends(get_db)):
+def media(vid: int, segment: str = Query("pre_pitch", pattern="^(pre_pitch|full)$"), db: Session = Depends(get_db)):
+    """Licensed local media with server-side spoiler protection.
+
+    Default: the FFmpeg-trimmed pre-pitch segment [0, pre_pitch_pause_time) (409 if the clip is unaligned).
+    segment=full: the whole clip, only after a prediction for this pitch was revealed (403 before)."""
     v = db.get(VideoAsset, vid)
-    if v is None or v.playback_method != "licensed_local" or not v.permitted_media_reference:
-        raise LookupError("no licensed local media for this asset")
-    p = Path(v.permitted_media_reference)
-    if not p.exists():
-        raise LookupError("licensed file missing")
-    return FileResponse(p, media_type="video/mp4")
+    try:
+        p = media_for(db, v, segment)
+    except MediaForbidden as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except MediaNotAligned as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return FileResponse(Path(p), media_type="video/mp4", headers={"Cache-Control": "private, no-store"})

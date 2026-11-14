@@ -164,11 +164,20 @@ def attempt_view(session: Session, att: ChallengeAttempt, pred: dict | None = No
         },
         "trace": pred["trace"] if pred else None,
         # The video reference is withheld until reveal so the clip cannot be opened before the prediction.
-        "video": {"available": att.video_asset_id is not None, "mode": att.mode},
+        # In-app (licensed, aligned) clips may expose ONLY the attempt-scoped pre-pitch segment URL before reveal.
+        "video": {"available": att.video_asset_id is not None, "mode": att.mode, **_pre_pitch_video(session, att)},
     }
     if att.revealed:
         view.update(reveal_payload(session, att))
     return view
+
+
+def _pre_pitch_video(session: Session, att: ChallengeAttempt) -> dict:
+    from .video.align_service import has_pre_pitch_segment
+    v = session.get(VideoAsset, att.video_asset_id) if att.video_asset_id and att.mode == "in_app" else None
+    ok = has_pre_pitch_segment(v)
+    return {"pre_pitch_segment_available": ok,
+            "pre_pitch_media_url": f"/api/attempts/{att.attempt_id}/pre-pitch-media" if ok else None}
 
 
 def set_guess(session: Session, attempt_id: int, guess: str) -> None:
@@ -179,6 +188,7 @@ def set_guess(session: Session, attempt_id: int, guess: str) -> None:
 
 
 def reveal_payload(session: Session, att: ChallengeAttempt) -> dict:
+    from .video.align_service import has_pre_pitch_segment
     p = session.get(Pitch, att.pitch_uid)
     pp = session.get(PitchPrediction, att.prediction_id)
     label = session.scalar(select(PrePitchState.label).where(PrePitchState.pitch_uid == att.pitch_uid))
@@ -196,7 +206,11 @@ def reveal_payload(session: Session, att: ChallengeAttempt) -> dict:
             "video_asset_id": v.video_asset_id, "source_provider": v.source_provider,
             "playback_method": v.playback_method, "source_page_url": v.source_page_url,
             "authorized_embed_reference": v.authorized_embed_reference,
-            "media_url": f"/api/videos/{v.video_asset_id}/media" if v.playback_method == "licensed_local" else None,
+            "media_url": f"/api/videos/{v.video_asset_id}/media?segment=full"
+            if v.playback_method == "licensed_local" else None,
+            "pre_pitch_media_url": f"/api/videos/{v.video_asset_id}/media" if has_pre_pitch_segment(v) else None,
+            "synchronization_status": v.synchronization_status, "alignment_confidence": v.alignment_confidence,
+            "pitch_end_time": v.pitch_end_time,
             "pre_pitch_pause_time": v.pre_pitch_pause_time, "release_frame_timestamp": v.release_frame_timestamp,
             "match_confidence": v.match_confidence, "rights": v.rights_or_permission_status,
             "availability": v.video_availability_status},
