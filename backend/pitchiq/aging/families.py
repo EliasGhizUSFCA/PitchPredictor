@@ -1,9 +1,13 @@
 """Pitch-type families, measurement eras and age helpers for the aging dataset.
 
 Official Statcast codes are always stored unchanged. `pitch_family` is an analysis grouping that absorbs
-classification changes, most importantly the 2023 introduction of the sweeper (ST) and slurve (SV) codes, which split
-pitches that earlier seasons label SL. `pitch_group` follows Baseball Savant's fastball / breaking / offspeed grouping
-and also absorbs four-seam <-> sinker relabelling (both are "fastball").
+classification changes, most importantly the sweeper (ST) and slurve (SV) codes that Statcast introduced publicly in
+2023. Savant serves ST/SV for earlier seasons too (as currently classified), but sparsely: in the stored leaderboard
+data ST pitcher-season rows grow from 7 (2015) to 118 (2021), 176 (2022) and 286 (2023), while many pitchers' sliders
+move from SL to SL+ST or ST across seasons. Family-level deltas (SL/ST/SV -> "slider") are therefore comparable across
+seasons; per-code deltas are not, and aging_observations.reclass_flag marks pairs whose codes inside a family changed.
+`pitch_group` follows Baseball Savant's fastball / breaking / offspeed grouping and also absorbs four-seam <-> sinker
+relabelling (both are "fastball").
 
 Savant season leaderboards fold the Statcast knuckle-curve (KC) and slow-curve (CS) codes into CU; this module maps
 them to CU's family as well, so leaderboard rows and pitch-level rows agree on the family.

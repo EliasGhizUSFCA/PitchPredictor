@@ -255,7 +255,7 @@ def ensure_bios(session: Session, client: PoliteClient, ids: set[int], log_: src
             primary_position=(p.get("primaryPosition") or {}).get("abbreviation"),
             birth_country=p.get("birthCountry"),
             mlb_debut_date=date.fromisoformat(p["mlbDebutDate"]) if p.get("mlbDebutDate") else None,
-            source="mlb_stats_api.people", source_url=p["_source_url"][:512], fetched_at=p["_fetched_at"],
+            source="mlb_stats_api.people", source_url=p["_source_url"], fetched_at=p["_fetched_at"],
             updated_at=datetime.now(timezone.utc)))
     if rows:
         _upsert_rows(session, PitcherBio, rows, ["pitcher_id"])

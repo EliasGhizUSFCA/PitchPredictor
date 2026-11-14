@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import (BigInteger, Boolean, CheckConstraint, Date, DateTime, Float, Index, Integer, SmallInteger,
-                        String, UniqueConstraint, func)
+                        String, Text, UniqueConstraint, func)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -44,7 +44,7 @@ class PitcherBio(Base):
     birth_country: Mapped[str | None] = mapped_column(String(64))
     mlb_debut_date: Mapped[date | None] = mapped_column(Date)
     source: Mapped[str] = mapped_column(String(64), default="mlb_stats_api.people")
-    source_url: Mapped[str | None] = mapped_column(String(512))
+    source_url: Mapped[str | None] = mapped_column(Text)  # exact bulk-people URL (100 ids; can exceed 512 chars)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = _now()
     __table_args__ = (CheckConstraint("throws IS NULL OR throws IN ('L','R','S')", name="ck_bio_throws"),)

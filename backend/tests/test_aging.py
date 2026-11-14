@@ -253,6 +253,20 @@ def test_career_pitches_are_history_only_and_do_not_reach_modeling(aged):
     assert v["pitch_rows"] == n19 and v["savant_pitch_count"] is not None
 
 
+def test_bio_source_url_is_exact_for_full_bulk_request(session):
+    """A 100-id bulk people URL exceeds 512 chars; the stored provenance must be the exact URL (not truncated)."""
+    from pitchiq.aging.etl import ensure_bios
+    from pitchiq.models_aging import PitcherBio
+    ids = [PID] + list(range(600001, 600100))  # 99 ids absent from the fixtures: requested, not returned
+    log_ = src.SourceLog()
+    res = ensure_bios(session, AgingFixtureClient(), set(ids), log_, refresh=True)
+    assert res["requested"] == 100 and res["returned"] == 1 and len(res["not_returned"]) == 99
+    bio = session.get(PitcherBio, PID)
+    expected = src.full_url(src.PEOPLE_URL, {"personIds": ",".join(map(str, sorted(ids)))})
+    assert len(expected) > 512 and bio.source_url == expected
+    assert bio.birth_date == date(1989, 3, 30)
+
+
 def test_career_ingest_refuses_modeling_seasons(session):
     from pitchiq.aging.etl import ingest_career_pitches
     out = ingest_career_pitches(session, PID, [2023, 2024], client=AgingFixtureClient())
