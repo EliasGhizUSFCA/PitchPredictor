@@ -34,6 +34,7 @@ from ..logging_setup import log
 from ..models import EvaluationRun, ModelRegistry
 from . import lifecycle, tracking
 from .metrics import cluster_bootstrap, confusion, reliability, summarize
+from . import decay
 from .protocol import evaluation_role, game_table, load_dated_frame, make_model, role_label
 from .refit import POLICIES, policy_due, tag_evaluation_run
 
@@ -90,7 +91,8 @@ def _recipe(session: Session, pitcher_id: int, family: str) -> ModelRegistry:
 
 
 def replay_seasons(df: pd.DataFrame, classes: list[str], family: str, params: dict, seasons,
-                   policies=POLICIES, cache: dict | None = None) -> dict[int, dict]:
+                   policies=POLICIES, cache: dict | None = None,
+                   features: list[str] | None = None) -> dict[int, dict]:
     """Continuous replay over `seasons` (state carried across the offseason); metrics reported per season."""
     games = game_table(df)
     seasons = sorted(int(x) for x in seasons)
@@ -119,7 +121,7 @@ def replay_seasons(df: pd.DataFrame, classes: list[str], family: str, params: di
                 if key not in cache:
                     tr = df.iloc[:n_before]  # df is sorted chronologically: exactly the rows dated before `cut`
                     assert (tr.game_date < cut).all()
-                    cache[key] = make_model(family, classes, params).fit(tr, tr["label"])
+                    cache[key] = decay.fit(make_model(family, classes, params, features), tr, cut)
                 te = df[df.game_pk == gpk]
                 Ps.append(cache[key].predict_proba(te, calibrated=False))
                 ys.append(te["label"].map(idx).to_numpy().astype(int))
@@ -155,14 +157,18 @@ def replay_season(df: pd.DataFrame, classes: list[str], family: str, params: dic
 def replay_policies(session: Session, pitcher_id: int, families=("frequency", "logreg", "lightgbm"),
                     seasons=(2025, 2026), policies=POLICIES, progress: Callable | None = None) -> list[EvaluationRun]:
     classes = get_classes(session, pitcher_id)
-    df = load_dated_frame(session, pitcher_id)
+    frames: dict = {}
     runs = []
     steps = len(families) * len(seasons)
     k = 0
     for fam in families:
         entry = _recipe(session, pitcher_id, fam)
         params = lifecycle.lifecycle_row(session, entry.model_version).selected_params
-        allres = replay_seasons(df, classes, fam, params, seasons, policies, {})
+        if entry.feature_version not in frames:  # the recipe's own feature version and feature list
+            frames[entry.feature_version] = load_dated_frame(session, pitcher_id, entry.feature_version)
+        df = frames[entry.feature_version]
+        allres = replay_seasons(df, classes, fam, params, seasons, policies, {},
+                                features=(entry.feature_schema or {}).get("used_features"))
         replay_start = str(min(d for d in df[df.game_season == min(seasons)].game_date))
         for season in sorted(seasons):
             role = evaluation_role(season)

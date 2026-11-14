@@ -33,6 +33,7 @@ from ..features.schema import FEATURE_VERSION
 from ..features.store import load_feature_frame
 from ..logging_setup import log
 from .metrics import log_loss, reliability, summarize
+from . import decay
 from .models import FAMILIES, FrequencyBaseline, TemperatureCalibrator
 
 logger = logging.getLogger(__name__)
@@ -179,10 +180,15 @@ def rolling_folds(df: pd.DataFrame, classes: list[str], eval_seasons: list[int] 
 
 # ------------------------------------------------------------------ fitting
 def make_model(family: str, classes: list[str], params: dict, features: list[str] | None = None):
-    p = dict(params)
+    """`params` may carry `decay_half_life_days` (training-time time-decay weights, ml/decay.py); it is a recipe
+    parameter, not a model-family argument. Fit through `decay.fit(model, train, ref_date)` to apply it."""
+    from .decay import split_params
+    p, half_life = split_params(params)
     if family == "lightgbm":
         p.setdefault("n_estimators", LGBM_MAX_ROUNDS)
-    return FAMILIES[family](classes, features=features, **p)
+    m = FAMILIES[family](classes, features=features, **p)
+    m.decay_half_life_days = half_life
+    return m
 
 
 def lgbm_checkpoints(max_rounds: int | None = None, step: int | None = None) -> list[int]:
@@ -201,7 +207,8 @@ def _fold_predictions(df: pd.DataFrame, folds: list[Fold], family: str, classes:
         p = dict(params)
         if family == "lightgbm" and checkpoints:
             p["n_estimators"] = max(checkpoints)
-        m = make_model(family, classes, p, features).fit(tr, tr["label"])  # never sees the scored block
+        # never sees the scored block; time-decay weights (if any) are aged from the block's first game date
+        m = decay.fit(make_model(family, classes, p, features), tr, f.start_date)
         if family == "lightgbm" and checkpoints:
             Xte = m._X(te)
             for k in checkpoints:
@@ -341,7 +348,8 @@ def rolling_dev_evaluate(df: pd.DataFrame, classes: list[str], family: str, grid
                     summary_cal=s_cal, ece_cal=reliability(P_cal, y, classes)["ece_top_label"],
                     ece_raw=reliability(P_raw, y, classes)["ece_top_label"], seconds=time.perf_counter() - t0,
                     extra={"eval_seasons": list(eval_seasons or get_settings().dev_eval_seasons),
-                           "block_games": int(block_games or get_settings().dev_block_games)})
+                           "block_games": int(block_games or get_settings().dev_block_games),
+                           "features": list(features) if features is not None else None})
     log(logger, "rolling_dev_evaluated", family=family, params=params, raw_log_loss=s_raw["log_loss"],
         cal_log_loss=s_cal["log_loss"], folds=sum(f.skipped is None for f in folds), seconds=res.seconds)
     return res

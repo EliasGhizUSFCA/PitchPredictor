@@ -42,9 +42,14 @@ def t_retrain_next_pitch(session, params, ctx):
 
 
 def t_refit_next_pitch(session, params, ctx):
+    """params: families, promote (default true), decay_half_lives (list of days / null; default
+    ml/decay.DEFAULT_HALF_LIVES; [] = no decay stage)."""
+    from ..ml.decay import DEFAULT_HALF_LIVES
     from ..ml.refit import FAMILY_ORDER, refit_all
+    hl = params.get("decay_half_lives", list(DEFAULT_HALF_LIVES))
     return refit_all(session, _pid(params), params.get("families") or FAMILY_ORDER,
-                     promote=params.get("promote", True), progress=ctx.progress)
+                     promote=params.get("promote", True), progress=ctx.progress,
+                     decay_half_lives=tuple(hl) if hl else None)
 
 
 def t_policy_replay(session, params, ctx):
@@ -193,5 +198,43 @@ def t_align_videos(session, params, ctx):
 
 
 TASKS["align_videos"] = t_align_videos
+
+
+def t_batter_priors(session, params, ctx):
+    """MLB-wide batter leaderboards -> as-of empirical-Bayes priors (np-features). params: pitcher_id, refresh."""
+    from ..batter_priors import refresh
+    return refresh(session, _pid(params), use_cache=not params.get("refresh", False))
+
+
+def t_feature_ablation(session, params, ctx):
+    """v2 feature-group / decay ablation on the rolling development folds. params: family, seeds, configs."""
+    from ..ml.feature_ablation import run_ablation
+    r = run_ablation(session, _pid(params), params.get("family", "lightgbm"), seeds=params.get("seeds", (0, 1, 2)),
+                     configs=params.get("configs"), progress=ctx.progress)
+    return {"evaluation_run_id": r["evaluation_run_id"],
+            "results": [{k: x[k] for k in ("config", "val_log_loss", "delta_log_loss")} for x in r["metrics"]["results"]]}
+
+
+TASKS["batter_priors"] = t_batter_priors
+DESCRIPTIONS["batter_priors"] = ("MLB-wide batter leaderboards (Savant pitch-arsenal-stats, custom, platoon search) -> "
+                                 "as-of empirical-Bayes batter priors for next-pitch features v2")
+TASKS["feature_ablation"] = t_feature_ablation
+DESCRIPTIONS["feature_ablation"] = ("Next-pitch v2 feature-group and time-decay ablation on rolling development folds "
+                                    "(overall + per-class CH/SI log loss and Brier)")
 DESCRIPTIONS["align_videos"] = ("Automatic pre-pitch alignment of licensed local clips (OpenCV/FFmpeg: scene cuts, "
                                 "center-field view, delivery onset); low confidence stays unaligned")
+
+
+def t_aging_model(session, params, ctx):
+    """Aging forecast engine (pitchiq.aging_model.pipeline). params: pitcher_id, families, cutoff, origins, methods,
+    workers, analyses (default true), mirror (default true)."""
+    from ..aging_model.pipeline import run_aging_model
+    return run_aging_model(session, _pid(params), families=params.get("families"), cutoff=params.get("cutoff"),
+                           origins=params.get("origins"), methods=params.get("methods"),
+                           workers=params.get("workers"), analyses=params.get("analyses", True),
+                           mirror=params.get("mirror", True), progress=ctx.progress)
+
+
+TASKS["aging_model"] = t_aging_model
+DESCRIPTIONS["aging_model"] = ("Aging forecast engine: rolling-origin backtest of 7 methods per pitch characteristic, "
+                               "per-target selection on development seasons, forecasts with intervals + draws")

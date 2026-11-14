@@ -6,6 +6,8 @@ from pitchiq.models import Base
 import pitchiq.models_lifecycle  # noqa: E402,F401  (np-refit tables)
 import pitchiq.models_aging  # noqa: E402,F401  (aging dataset tables)
 import pitchiq.models_video_cv  # noqa: E402,F401  (video alignment tables)
+import pitchiq.models_aging_forecast  # noqa: E402,F401  (aging forecast engine tables)
+import pitchiq.models_batter_priors  # noqa: E402,F401  (np-features batter priors tables)
 
 config = context.config
 url = config.attributes.get("database_url") or get_settings().database_url

@@ -400,3 +400,5 @@ class DataValidationReport(Base):
 from . import models_lifecycle  # noqa: E402,F401  (np-refit lifecycle tables)
 from . import models_aging  # noqa: E402,F401  (aging dataset tables)
 from . import models_video_cv  # noqa: E402,F401  (video alignment tables)
+from . import models_aging_forecast  # noqa: E402,F401  (aging forecast engine tables)
+from . import models_batter_priors  # noqa: E402,F401  (np-features batter leaderboard / prior tables)

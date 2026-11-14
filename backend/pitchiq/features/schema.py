@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FEATURE_VERSION = "v1"
+FEATURE_VERSION = "v2"  # current version built, trained and served by default
+FEATURE_VERSIONS = ("v1", "v2")  # every version is rebuilt on ingestion so v1 models stay usable
 NONE_TOKEN = "NONE"  # no previous pitch (first pitch of game / PA)
 
 
@@ -73,19 +74,54 @@ FORBIDDEN_SOURCE_COLUMNS = {
 # seasons outside the training range (linear models extrapolate it). Decided from the a-priori argument and
 # the validation ablation (removing the context group improved logreg validation log loss by 0.036).
 MODEL_EXCLUDED_DEFAULT = {"season"}
+# v2 models read the previous pitch's velocity from `prev1_velocity` + explicit flags; v1's `prev1_speed` (missing
+# value = "no previous pitch") stays in the stored dictionary for v1 models but is not a v2 model input.
+MODEL_EXCLUDED_BY_VERSION = {"v1": MODEL_EXCLUDED_DEFAULT, "v2": MODEL_EXCLUDED_DEFAULT | {"prev1_speed"}}
 
-FEATURE_GROUPS = ["handedness", "lineup", "count", "inning", "pitch_count", "sequence", "situation", "tto",
-                  "batter_history", "usage", "context"]
+V1_GROUPS = ["handedness", "lineup", "count", "inning", "pitch_count", "sequence", "situation", "tto",
+             "batter_history", "usage", "context"]
 
 
-def feature_list(classes: list[str]) -> list[Feature]:
+def _v2_groups() -> list[str]:
+    from .v2 import GROUPS
+    return list(GROUPS)
+
+
+FEATURE_GROUPS = V1_GROUPS + _v2_groups()
+
+
+def feature_list(classes: list[str], version: str = FEATURE_VERSION) -> list[Feature]:
+    if version not in FEATURE_VERSIONS:
+        raise ValueError(f"unknown feature version {version}; known {FEATURE_VERSIONS}")
     feats = list(BASE_FEATURES)
     for tmpl, group, desc in PER_CLASS_TEMPLATES:
         for c in classes:
             feats.append(Feature(tmpl.format(c=c), "numeric", group, desc.format(c=c)))
+    if version == "v2":
+        from .v2 import schema
+        feats += [Feature(n, k, g, d) for n, k, g, d in schema(classes)]
     return feats
 
 
-def schema_dict(classes: list[str]) -> dict:
-    return {"feature_version": FEATURE_VERSION, "classes": classes,
-            "features": [f.__dict__ for f in feature_list(classes)]}
+# v2 feature groups that are stored but not used as default model inputs. Chosen on the rolling development
+# ablation (2024-2025 folds) only; see docs/np-features.md. Empty = every v2 group is a default input.
+V2_MODEL_EXCLUDED_GROUPS: set[str] = set()
+
+
+def default_model_features(classes: list[str], version: str = FEATURE_VERSION) -> list[str]:
+    excl = MODEL_EXCLUDED_BY_VERSION.get(version, MODEL_EXCLUDED_DEFAULT)
+    groups = V2_MODEL_EXCLUDED_GROUPS if version == "v2" else set()
+    return [f.name for f in feature_list(classes, version) if f.name not in excl and f.group not in groups]
+
+
+def schema_dict(classes: list[str], version: str = FEATURE_VERSION) -> dict:
+    d = {"feature_version": version, "classes": classes,
+         "features": [f.__dict__ for f in feature_list(classes, version)]}
+    if version == "v2":
+        from . import v2
+        d["params"] = {"ewm_half_life_days": v2.EWM_HALF_LIFE_DAYS, "windows": v2.WINDOWS,
+                       "smoothing": {"rec_all": v2.K_REC_ALL, "rec_cond": v2.K_REC_COND, "rec_bat": v2.K_REC_BAT,
+                                     "catcher": v2.K_CATCHER, "bvp_swing": v2.K_BVP_SWING,
+                                     "bvp_whiff": v2.K_BVP_WHIFF},
+                       "model_excluded_default": sorted(MODEL_EXCLUDED_BY_VERSION["v2"])}
+    return d

@@ -147,6 +147,10 @@ class PrevPitch(BaseModel):
     result: str = Field("ball", description="ball|called_strike|swinging_strike|foul|in_play|hbp")
     speed: float | None = None
     same_pa: bool = True
+    # v2: location of the previous pitch (None = not measured / not specified -> explicit missing flag)
+    plate_x: float | None = Field(None, ge=-5, le=5)
+    plate_z: float | None = Field(None, ge=-3, le=8)
+    zone: int | None = Field(None, ge=1, le=14)
 
 
 class SimState(BaseModel):
@@ -167,6 +171,8 @@ class SimState(BaseModel):
     previous_pitches: list[PrevPitch] = Field(default_factory=list, description="oldest first")
     as_of_date: date | None = None
     days_rest: float | None = 5.0
+    catcher_id: int | None = Field(None, description="v2: catcher (MLBAM id); default = catcher of the pitcher's "
+                                                     "most recent game before the as-of date")
 
     @field_validator("stand")
     @classmethod
@@ -210,12 +216,17 @@ def _history_cached(pitcher_id: int, as_of: date, classes: tuple, _key: str):
     """(History counters, mean velocity per class) from games strictly before `as_of`."""
     from ..db import session_scope
     from ..features.build import map_label
+    from ..batter_priors import load_priors
     with session_scope() as s:
         df = load_pitch_frame(s, pitcher_id)
+        priors = load_priors(s, pitcher_id, list(classes))
     before = df[df["game_date"] < as_of].copy()
     before["cls"] = [map_label(t, list(classes)) for t in before["pitch_type"]]
     velo = before.groupby("cls")["release_speed"].mean().dropna().to_dict()
-    return history_as_of(df, list(classes), as_of), velo
+    hist = history_as_of(df, list(classes), as_of, batter_priors=priors)
+    last = before.sort_values(["game_date", "game_pk", "at_bat_number", "pitch_number"])["catcher_id"].dropna()
+    hist.sim_default_catcher = int(last.iloc[-1]) if len(last) else None
+    return hist, velo
 
 
 def _fit_cutoff(session: Session, entry: ModelRegistry) -> date | None:
@@ -258,14 +269,33 @@ def _unknown_prev_distribution(session: Session, entry: ModelRegistry, count_str
                                max_combos: int = 12) -> list[tuple[float, str, str, int]]:
     """Empirical joint of (prev1_type, prev1_result, prev1_same_pa) in training rows with this count and
     at least one prior pitch. Used to marginalize the model over an unknown previous pitch."""
+    return [t[:4] for t in _unknown_prev_detail(session, entry, count_str, max_combos)]
+
+
+def _unknown_prev_detail(session: Session, entry: ModelRegistry, count_str: str, max_combos: int = 12) -> list:
+    """As `_unknown_prev_distribution`, plus (v2 training rows) the median velocity / plate location and the modal
+    zone of the previous pitch within each combination: (weight, type, result, same_pa, detail | None)."""
     tr = _train_frame(session, entry)
     sub = tr[(tr["count_str"] == count_str) & (tr["pitch_count_before"] > 0)]
     if len(sub) < 20:
         sub = tr[tr["pitch_count_before"] > 0]
-    vc = sub.groupby(["prev1_type", "prev1_result", "prev1_same_pa"]).size().sort_values(ascending=False)
+    keys = ["prev1_type", "prev1_result", "prev1_same_pa"]
+    vc = sub.groupby(keys).size().sort_values(ascending=False)
     vc = vc.iloc[:max_combos]
     w = vc / vc.sum()
-    return [(float(w.iloc[i]), *vc.index[i]) for i in range(len(vc))]
+    has_detail = all(c in sub for c in ("prev1_velocity", "prev1_plate_x", "prev1_plate_z", "prev1_zone"))
+    out = []
+    for i in range(len(vc)):
+        detail = None
+        if has_detail:
+            g = sub[(sub[keys[0]] == vc.index[i][0]) & (sub[keys[1]] == vc.index[i][1]) &
+                    (sub[keys[2]] == vc.index[i][2])]
+            zones = g["prev1_zone"][~g["prev1_zone"].isin(["NONE", "UNK"])]
+            med = lambda c: _clean(pd.to_numeric(g[c], errors="coerce").median())  # noqa: E731
+            detail = {"speed": med("prev1_velocity"), "plate_x": med("prev1_plate_x"),
+                      "plate_z": med("prev1_plate_z"), "zone": int(zones.mode().iloc[0]) if len(zones) else None}
+        out.append((float(w.iloc[i]), *vc.index[i], detail))
+    return out
 
 
 def sim_feature_mixture(session: Session, entry: ModelRegistry, state: SimState) -> tuple[list[tuple[float, dict]], dict]:
@@ -276,6 +306,10 @@ def sim_feature_mixture(session: Session, entry: ModelRegistry, state: SimState)
     hist, velo = _history_cached(pitcher_id, as_of, tuple(classes), "v")
     notes = {"as_of_date": str(as_of), "imputed": [], "marginalized_over": None}
 
+    catcher = state.catcher_id if state.catcher_id is not None else getattr(hist, "sim_default_catcher", None)
+    if state.catcher_id is None and catcher is not None:
+        notes["imputed"].append(f"catcher = {catcher} (catcher of the most recent game before the as-of date)")
+
     def build(prev: list[PrevPitch]) -> dict:
         game, pa = GameState(), PAState()
         for p in prev:
@@ -283,7 +317,13 @@ def sim_feature_mixture(session: Session, entry: ModelRegistry, state: SimState)
             spd = p.speed if p.speed is not None else velo.get(t)
             game.types.append(t)
             game.results.append(p.result)
-            game.speeds.append(spd)
+            game.speeds.append(spd)  # v1 semantics: imputed with the type mean
+            # v2 semantics (identical to history): unspecified = not measured -> explicit missing flag, and
+            # make_features imputes the velocity with the type's mean over games before the as-of date
+            game.speeds_measured.append(p.speed)
+            game.plate_x.append(p.plate_x)
+            game.plate_z.append(p.plate_z)
+            game.zones.append(p.zone)
             game.ab_numbers.append(1 if p.same_pa else 0)
             if t == "FF" and spd:
                 game.ff_speeds.append(spd)
@@ -301,24 +341,39 @@ def sim_feature_mixture(session: Session, entry: ModelRegistry, state: SimState)
             "pitch_number": max(n_pa + 1, state.balls + state.strikes + 1),
             "n_thruorder_pitcher": state.times_through_order, "season": as_of.year, "days_rest": state.days_rest,
             "batter": state.batter_id, "pitch_count_before": state.pitch_count_before,
+            "game_date": as_of, "catcher_id": catcher,
         }
         return make_features(ctx, hist, game, pa, classes)
 
     if any(p.speed is None for p in state.previous_pitches):
-        notes["imputed"].append("previous pitch velocity = pitcher's historical mean for that pitch type")
+        notes["imputed"].append("previous pitch velocity = pitcher's historical mean for that pitch type"
+                                + (" (v2: flagged previous_pitch_velocity_missing=1)" if entry.feature_version != "v1"
+                                   else ""))
+    if entry.feature_version != "v1" and any(p.plate_x is None or p.plate_z is None or p.zone is None
+                                             for p in state.previous_pitches):
+        notes["imputed"].append("previous pitch location not specified: flagged previous_pitch_location_missing=1")
+    if state.batter_id is None and entry.feature_version != "v1":
+        notes["imputed"].append("batter not specified: MLB-wide batter priors = league means (blb_missing=1)")
     if state.pitch_count_before > 0 and not state.previous_pitches:
         mix = []
-        combos = _unknown_prev_distribution(session, entry, f"{state.balls}-{state.strikes}")
-        for w, t, r, same in combos:
-            mix.append((w, build([PrevPitch(type=t, result=r, same_pa=bool(same))])))
+        combos = _unknown_prev_detail(session, entry, f"{state.balls}-{state.strikes}")
+        for w, t, r, same, detail in combos:
+            pp = PrevPitch(type=t, result=r, same_pa=bool(same))
+            if detail is not None and entry.feature_version != "v1":
+                pp = PrevPitch(type=t, result=r, same_pa=bool(same), speed=detail["speed"],
+                               plate_x=detail["plate_x"], plate_z=detail["plate_z"], zone=detail["zone"])
+            mix.append((w, build([pp])))
         tot = sum(w for w, _ in mix)
         mix = [(w / tot, f) for w, f in mix]
         notes["marginalized_over"] = {
             "reason": "pitch count > 0 but previous pitch not specified",
             "method": "weighted average of model outputs over the training distribution of "
-                      "(previous type, previous result, same PA) in this count",
-            "combinations": [{"prev1_type": t, "prev1_result": r, "prev1_same_pa": bool(same), "weight": w / tot}
-                             for w, t, r, same in combos]}
+                      "(previous type, previous result, same PA) in this count"
+                      + ("; previous velocity / location = median (zone = mode) of the training rows of each "
+                         "combination" if entry.feature_version != "v1" else ""),
+            "combinations": [{"prev1_type": t, "prev1_result": r, "prev1_same_pa": bool(same), "weight": w / tot,
+                              **({"detail": d} if d is not None and entry.feature_version != "v1" else {})}
+                             for w, t, r, same, d in combos]}
         return mix, notes
     return [(1.0, build(state.previous_pitches))], notes
 

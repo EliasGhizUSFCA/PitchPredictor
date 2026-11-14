@@ -58,3 +58,11 @@ app.include_router(_aging.router, prefix="/api")
 from .routers import video_cv as _video_cv  # noqa: E402  (automatic video alignment, Mode A)
 
 app.include_router(_video_cv.router, prefix="/api")
+
+from .routers import features_v2 as _features_v2  # noqa: E402  (np-features: v2 schema, batter priors, ablation)
+
+app.include_router(_features_v2.router, prefix="/api")
+
+from .routers import aging_forecast as _aging_forecast  # noqa: E402  (aging forecast engine, System B)
+
+app.include_router(_aging_forecast.router, prefix="/api")

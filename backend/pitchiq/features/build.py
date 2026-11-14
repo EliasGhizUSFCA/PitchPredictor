@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from ..pitch_types import result_category
+from . import v2
 from .schema import NONE_TOKEN
 
 SMOOTH_GAME = 10.0     # pseudo-pitches toward the prior for in-game usage
@@ -32,7 +33,10 @@ PRE_PITCH_COLUMNS = [
     "game_pk", "game_date", "season", "batter", "stand", "balls", "strikes", "inning", "inning_topbot",
     "outs_when_up", "on_1b", "on_2b", "on_3b", "bat_score", "fld_score", "at_bat_number", "pitch_number",
     "n_thruorder_pitcher", "bat_order_slot", "days_rest",
+    "catcher_id",  # v2: the catcher for the pitch is known before it is thrown
 ]
+# Post-pitch measurements of a thrown pitch read only AFTER its features are frozen (to update state for later pitches).
+POST_PITCH_LOCATION = ("plate_x", "plate_z", "zone")
 
 
 def count_key(b: int, s: int) -> str:
@@ -60,6 +64,18 @@ class History:
     by_batter: dict = field(default_factory=lambda: defaultdict(Counter))
     recent_games: deque = field(default_factory=lambda: deque(maxlen=RECENT_GAMES))
     last_game_date: date | None = None
+    # ---- v2 (features/v2.py)
+    game_log: list = field(default_factory=list)
+    velo_sum: Counter = field(default_factory=Counter)
+    velo_n: Counter = field(default_factory=Counter)
+    by_catcher: dict = field(default_factory=lambda: defaultdict(Counter))
+    bvp_swings: dict = field(default_factory=lambda: defaultdict(Counter))
+    bvp_whiffs: dict = field(default_factory=lambda: defaultdict(Counter))
+    swings: Counter = field(default_factory=Counter)
+    whiffs: Counter = field(default_factory=Counter)
+    batter_priors: object = None  # batter_priors.BatterPriors (MLB-wide priors from seasons before the pitch)
+    ewm_half_life_days: float = v2.EWM_HALF_LIFE_DAYS
+    window_cache: dict = field(default_factory=dict)
 
     def overall_prior(self, classes):
         return _norm(self.overall, classes)
@@ -74,6 +90,7 @@ class History:
             self.by_batter[b].update(cnt)
         self.recent_games.append(Counter(game.usage))
         self.last_game_date = game_date
+        v2.absorb(self, game, game_date)
 
 
 @dataclass
@@ -88,6 +105,16 @@ class GameState:
     by_batter: dict = field(default_factory=lambda: defaultdict(Counter))
     count_events: list = field(default_factory=list)
     transitions: list = field(default_factory=list)
+    # ---- v2
+    speeds_measured: list = field(default_factory=list)  # measured velocity or None (never imputed)
+    plate_x: list = field(default_factory=list)
+    plate_z: list = field(default_factory=list)
+    zones: list = field(default_factory=list)
+    by_catcher: dict = field(default_factory=lambda: defaultdict(Counter))
+    bvp_swings: dict = field(default_factory=lambda: defaultdict(Counter))
+    bvp_whiffs: dict = field(default_factory=lambda: defaultdict(Counter))
+    swings: Counter = field(default_factory=Counter)
+    whiffs: Counter = field(default_factory=Counter)
 
     @property
     def n(self) -> int:
@@ -148,11 +175,13 @@ def make_features(ctx: dict, hist: History, game: GameState, pa: PAState, classe
         f[f"bvp_share_{c}"] = v
     for c in classes:
         f[f"pa_n_{c}"] = pa.usage[c]
+    f.update(v2.features(ctx, hist, game, pa, classes, f))  # v2 additions; v1 keys/values unchanged
     return f
 
 
-def update_after_pitch(game: GameState, pa: PAState, ctx: dict, label: str | None, speed, description) -> None:
-    """Called only AFTER the target pitch's features have been frozen."""
+def update_after_pitch(game: GameState, pa: PAState, ctx: dict, label: str | None, speed, description,
+                       location: tuple | None = None) -> None:
+    """Called only AFTER the target pitch's features have been frozen. `location` = (plate_x, plate_z, zone)."""
     if label is None:  # automatic ball/strike (pitch clock): changes count, but no pitch thrown
         return
     ck = count_key(ctx["balls"], ctx["strikes"])
@@ -160,14 +189,21 @@ def update_after_pitch(game: GameState, pa: PAState, ctx: dict, label: str | Non
     game.count_events.append((ck, label))
     game.transitions.append((prev, label))
     game.types.append(label)
-    game.results.append(result_category(description))
-    game.speeds.append(None if speed is None or pd.isna(speed) else float(speed))
+    result = result_category(description)
+    game.results.append(result)
+    measured = None if speed is None or pd.isna(speed) else float(speed)
+    game.speeds.append(measured)
     game.ab_numbers.append(ctx["at_bat_number"])
     if label == "FF" and speed is not None and not pd.isna(speed):
         game.ff_speeds.append(float(speed))
     game.usage[label] += 1
     game.by_batter[ctx["batter"]][label] += 1
     pa.usage[label] += 1
+    v2.update(game, ctx, label, measured, result, location)
+
+
+def _location(row: dict) -> tuple:
+    return tuple(row.get(k) for k in POST_PITCH_LOCATION)
 
 
 def map_label(pitch_type, classes: list[str]) -> str | None:
@@ -176,13 +212,14 @@ def map_label(pitch_type, classes: list[str]) -> str | None:
     return pitch_type if pitch_type in classes else "OTHER"
 
 
-def build_feature_rows(df: pd.DataFrame, classes: list[str]) -> list[dict]:
-    """df: one pitcher's pitches with PRE_PITCH_COLUMNS + pitch_type/release_speed/description.
+def build_feature_rows(df: pd.DataFrame, classes: list[str], batter_priors=None) -> list[dict]:
+    """df: one pitcher's pitches with PRE_PITCH_COLUMNS + pitch_type/release_speed/description (+ plate_x/plate_z/zone).
 
-    Returns one dict per row: {pitch_uid, label, features} (label None for non-pitch rows).
+    Returns one dict per row: {pitch_uid, label, features} (label None for non-pitch rows). `batter_priors`
+    (batter_priors.BatterPriors) supplies MLB-wide batter priors from seasons before each pitch's season.
     """
     df = df.sort_values(["game_date", "game_pk", "at_bat_number", "pitch_number"])
-    hist = History()
+    hist = History(batter_priors=batter_priors)
     out = []
     for gpk, g in df.groupby("game_pk", sort=False):
         game = GameState()
@@ -195,15 +232,16 @@ def build_feature_rows(df: pd.DataFrame, classes: list[str]) -> list[dict]:
             feats = make_features(ctx, hist, game, pa, classes)
             label = map_label(row.get("pitch_type"), classes)
             out.append({"pitch_uid": row.get("pitch_uid"), "label": label, "features": feats})
-            update_after_pitch(game, pa, ctx, label, row.get("release_speed"), row.get("description"))
+            update_after_pitch(game, pa, ctx, label, row.get("release_speed"), row.get("description"),
+                               _location(row))
         hist.absorb_game(game, game_date)
     return out
 
 
-def history_as_of(df: pd.DataFrame, classes: list[str], before: date) -> History:
+def history_as_of(df: pd.DataFrame, classes: list[str], before: date, batter_priors=None) -> History:
     """History counters from all games strictly before `before` (used by the simulator)."""
     df = df[df["game_date"] < before].sort_values(["game_date", "game_pk", "at_bat_number", "pitch_number"])
-    hist = History()
+    hist = History(batter_priors=batter_priors)
     for _, g in df.groupby("game_pk", sort=False):
         game, pa, pa_ab = GameState(), PAState(), None
         for row in g.to_dict("records"):
@@ -211,6 +249,6 @@ def history_as_of(df: pd.DataFrame, classes: list[str], before: date) -> History
                 pa, pa_ab = PAState(), row["at_bat_number"]
             ctx = {k: row.get(k) for k in PRE_PITCH_COLUMNS}
             update_after_pitch(game, pa, ctx, map_label(row.get("pitch_type"), classes),
-                               row.get("release_speed"), row.get("description"))
+                               row.get("release_speed"), row.get("description"), _location(row))
         hist.absorb_game(game, g["game_date"].iloc[0])
     return hist

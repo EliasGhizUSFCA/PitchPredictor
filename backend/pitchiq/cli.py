@@ -49,6 +49,16 @@ def main(argv=None):
     rf = sub.add_parser("refit", help="Rolling development selection + final refit on all data before today + gates")
     rf.add_argument("--families", nargs="*", default=["majority", "frequency", "logreg", "lightgbm"])
     rf.add_argument("--no-promote", action="store_true")
+    rf.add_argument("--decay-half-lives", nargs="*", help="time-decay half-lives (days; 'none' = no decay) searched on "
+                                                          "the rolling dev folds (default: ml/decay.DEFAULT_HALF_LIVES)")
+    rf.add_argument("--no-decay", action="store_true", help="skip the time-decay selection stage")
+    rf.add_argument("--feature-version", default=None, help="feature version to train on (default: current)")
+    bpr = sub.add_parser("batter-priors", help="MLB-wide batter leaderboards (Savant) -> as-of EB batter priors (v2)")
+    bpr.add_argument("--refresh", action="store_true", help="bypass the raw response cache")
+    fab = sub.add_parser("feature-ablation", help="v2 feature-group / decay ablation on the rolling dev folds")
+    fab.add_argument("--family", default="lightgbm")
+    fab.add_argument("--seeds", type=int, nargs="*", default=[0, 1, 2])
+    fab.add_argument("--configs", nargs="*", help="subset of configs (v2_all is always included)")
     rt = sub.add_parser("retrain", help="Scheduled retraining of the production recipe (job retrain_next_pitch)")
     rt.add_argument("--policy", choices=["after_each_start", "every_6_starts", "weekly", "manual"], default="manual")
     rt.add_argument("--force", action="store_true")
@@ -83,6 +93,16 @@ def main(argv=None):
     ag.add_argument("--min-season-pitches", type=int, help="min pitches for a qualifying pitcher-season")
     ag.add_argument("--refresh", action="store_true", help="bypass the raw response cache")
     ag.add_argument("--refresh-bio", action="store_true", help="re-fetch birth dates already stored")
+    am = sub.add_parser("aging-model", help="System B: rolling-origin backtest of aging forecast methods, per-target "
+                                            "selection, forecasts from the historical cutoff (pitch_characteristic_"
+                                            "forecasts), survivor / confounding analyses, MLflow mirror")
+    am.add_argument("--families", nargs="*", help="pitch families to forecast (default: four_seam sinker slider changeup)")
+    am.add_argument("--cutoff", type=int, help="historical cutoff season (default: last loaded season)")
+    am.add_argument("--origins", type=int, nargs="*", help="backtest origins (default: every loaded season < cutoff)")
+    am.add_argument("--methods", nargs="*", help="subset of methods (default: all)")
+    am.add_argument("--workers", type=int, help="parallel processes (default min(4, CPUs))")
+    am.add_argument("--no-analyses", action="store_true", help="skip survivor / confounding analyses")
+    am.add_argument("--no-mirror", action="store_true", help="skip the MLflow mirror")
     sub.add_parser("bootstrap", help="Full pipeline: migrate, ingest, feeds, validate, features, videos, train, benchmark")
     sub.add_parser("worker", help="Run the background job worker")
     sv = sub.add_parser("serve")
@@ -178,12 +198,31 @@ def main(argv=None):
                               refresh_bio=args.refresh_bio, min_pitches=args.min_pitches,
                               min_season_pitches=args.min_season_pitches)
             out({k: v for k, v in r.items() if k != "sources"})
+        elif args.cmd == "aging-model":
+            from .aging_model.pipeline import run_aging_model
+            out(run_aging_model(s, pid, families=args.families, cutoff=args.cutoff, origins=args.origins,
+                                methods=args.methods, workers=args.workers, analyses=not args.no_analyses,
+                                mirror=not args.no_mirror))
         elif args.cmd == "promote":
             from .ml.lifecycle import promote_with_gates
             out(promote_with_gates(s, args.model_version, source="manual: pitchiq promote", force=args.force))
         elif args.cmd == "refit":
+            from .features.schema import FEATURE_VERSION
+            from .ml.decay import DEFAULT_HALF_LIVES
             from .ml.refit import refit_all
-            out(refit_all(s, pid, args.families, promote=not args.no_promote))
+            hl = None if args.no_decay else (tuple(None if str(x).lower() == "none" else float(x)
+                                                   for x in args.decay_half_lives)
+                                              if args.decay_half_lives else DEFAULT_HALF_LIVES)
+            out(refit_all(s, pid, args.families, promote=not args.no_promote, decay_half_lives=hl,
+                          feature_version=args.feature_version or FEATURE_VERSION))
+        elif args.cmd == "batter-priors":
+            from .batter_priors import refresh
+            out(refresh(s, pid, use_cache=not args.refresh))
+        elif args.cmd == "feature-ablation":
+            from .ml.feature_ablation import run_ablation, summary_table
+            r = run_ablation(s, pid, args.family, seeds=args.seeds, configs=args.configs)
+            print(summary_table(r["metrics"]).to_string(index=False))
+            out({"evaluation_run_id": r["evaluation_run_id"]})
         elif args.cmd == "retrain":
             from .ml.refit import retrain
             out(retrain(s, pid, args.policy, force=args.force, reselect=args.reselect, promote=not args.no_promote))

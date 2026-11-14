@@ -14,7 +14,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 import warnings
-from ..features.schema import MODEL_EXCLUDED_DEFAULT, feature_list
+from ..features.schema import default_model_features, feature_list
 warnings.filterwarnings("ignore", message=".*eval_set.*")
 from .metrics import log_loss
 
@@ -52,13 +52,14 @@ class BaseModel:
 
     def __init__(self, classes: list[str], features: list[str] | None = None, **params):
         self.classes = list(classes)
-        all_feats = feature_list(self.classes)
-        self.features = features or [f.name for f in all_feats if f.name not in MODEL_EXCLUDED_DEFAULT]
+        all_feats = feature_list(self.classes)  # current version (a superset of v1: kinds cover v1 models)
+        self.features = features or default_model_features(self.classes)
         kinds = {f.name: f.kind for f in all_feats}
         self.categorical = [f for f in self.features if kinds.get(f) == "categorical"]
         self.numeric = [f for f in self.features if kinds.get(f) != "categorical"]
         self.params = params
         self.calibrator: TemperatureCalibrator | None = None
+        self.decay_half_life_days: float | None = None  # set by protocol.make_model; weights via ml/decay.py
 
     def y_index(self, y: pd.Series) -> np.ndarray:
         m = {c: i for i, c in enumerate(self.classes)}
@@ -86,14 +87,18 @@ class BaseModel:
         return None
 
     def config(self) -> dict:
-        return {"family": self.family, "features": self.features, "params": self.params}
+        cfg = {"family": self.family, "features": self.features, "params": self.params}
+        if getattr(self, "decay_half_life_days", None) is not None:
+            cfg["decay_half_life_days"] = self.decay_half_life_days
+        return cfg
 
 
 class MajorityClassModel(BaseModel):
     family = "majority"
 
-    def fit(self, X, y, X_val=None, y_val=None):
-        counts = y.value_counts()
+    def fit(self, X, y, X_val=None, y_val=None, sample_weight=None):
+        w = np.ones(len(y)) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+        counts = pd.Series(w, index=y.index).groupby(y.to_numpy()).sum()
         self.prior = np.array([counts.get(c, 0) for c in self.classes], dtype=float) + 1.0
         self.prior /= self.prior.sum()
         return self
@@ -117,16 +122,17 @@ class FrequencyBaseline(BaseModel):
         super().__init__(classes, features=feats, levels=levels, alpha=alpha)
         self.levels, self.alpha = levels, alpha
 
-    def fit(self, X, y, X_val=None, y_val=None):
+    def fit(self, X, y, X_val=None, y_val=None, sample_weight=None):
         k = len(self.classes)
         yi = self.y_index(y)
-        self.root = (np.bincount(yi, minlength=k) + 1.0) / (len(yi) + k)
+        w = np.ones(len(yi)) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+        self.root = (np.bincount(yi, weights=w, minlength=k) + 1.0) / (w.sum() + k)
         self.tables = []
         for lvl in self.levels:
             keys = X[lvl].astype(str).agg("|".join, axis=1).to_numpy()
             table: dict[str, np.ndarray] = {}
-            for key, c in zip(keys, yi):
-                table.setdefault(key, np.zeros(k))[c] += 1
+            for key, c, wi in zip(keys, yi, w):
+                table.setdefault(key, np.zeros(k))[c] += wi
             self.tables.append(table)
         return self
 
@@ -175,8 +181,9 @@ class LogRegModel(BaseModel):
             X[c] = pd.to_numeric(X[c], errors="coerce").astype(float)
         return X
 
-    def fit(self, X, y, X_val=None, y_val=None):
-        self.pipe = self._pipe().fit(self._X(X), y)
+    def fit(self, X, y, X_val=None, y_val=None, sample_weight=None):
+        kw = {} if sample_weight is None else {"clf__sample_weight": np.asarray(sample_weight, dtype=float)}
+        self.pipe = self._pipe().fit(self._X(X), y, **kw)
         order = list(self.pipe.classes_)
         self._order = [order.index(c) for c in self.classes]
         return self
@@ -223,12 +230,13 @@ class LightGBMModel(BaseModel):
     def _X(self, X):
         X = X[self.features].copy()
         for c in self.categorical:
-            X[c] = pd.Categorical(X[c].astype(str), categories=self.categories_[c])
+            v = X[c].astype(str)  # categories unseen in training (e.g. a new catcher) -> missing
+            X[c] = pd.Categorical(v.where(v.isin(self.categories_[c])), categories=self.categories_[c])
         for c in self.numeric:
             X[c] = pd.to_numeric(X[c], errors="coerce").astype(float)
         return X
 
-    def fit(self, X, y, X_val=None, y_val=None):
+    def fit(self, X, y, X_val=None, y_val=None, sample_weight=None):
         import lightgbm as lgb
         self.categories_ = {c: sorted(X[c].astype(str).unique().tolist()) for c in self.categorical}
         p = dict(self.params)
@@ -238,6 +246,8 @@ class LightGBMModel(BaseModel):
         if X_val is not None:
             fit_kw = dict(eval_set=[(self._X(X_val), self.y_index(y_val))], eval_metric="multi_logloss",
                           callbacks=[lgb.early_stopping(100, verbose=False)])
+        if sample_weight is not None:
+            fit_kw["sample_weight"] = np.asarray(sample_weight, dtype=float)
         self.model.fit(self._X(X), self.y_index(y), **fit_kw)
         self.best_iteration_ = int(self.model.best_iteration_ or p["n_estimators"])
         return self

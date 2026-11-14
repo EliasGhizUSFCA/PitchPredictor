@@ -31,6 +31,7 @@ from ..models import EvaluationRun, ModelRegistry
 from ..models_lifecycle import ModelLifecycle
 from . import lifecycle, registry, tracking
 from .evaluate import full_report
+from . import decay
 from .models import TemperatureCalibrator
 from .protocol import (CALIBRATION_RULE, DevResult, game_table, load_dated_frame, make_model, per_fold_summaries,
                        role_label, rolling_dev_evaluate)
@@ -57,7 +58,8 @@ def selection_from_dev(res: DevResult) -> dict:
                 -np.mean(np.log(np.clip(TemperatureCalibrator._apply(np.log(np.clip(res.P_raw, 1e-12, 1)),
                                                                       res.temperature)[np.arange(len(res.y)), res.y],
                                         1e-15, 1)))),
-            "oos_fingerprint": fingerprint(res.eval_frame), "dev_evaluation_run_id": None}
+            "oos_fingerprint": fingerprint(res.eval_frame), "dev_evaluation_run_id": None,
+            "features": res.extra.get("features"), "feature_version": res.extra.get("feature_version")}
 
 
 def selection_from_entry(session: Session, entry: ModelRegistry) -> dict:
@@ -75,12 +77,15 @@ def selection_from_entry(session: Session, entry: ModelRegistry) -> dict:
             "chrono_calibrated_oos_log_loss": cal.get("chrono_calibrated_oos_log_loss"),
             "calibrated_oos_log_loss_in_sample_T": cal.get("val_log_loss_after"),
             "oos_fingerprint": (entry.dataset_fingerprint or {}).get("development_oos"),
-            "dev_evaluation_run_id": lc.dev_evaluation_run_id, "inherited_from": entry.model_version}
+            "dev_evaluation_run_id": lc.dev_evaluation_run_id, "inherited_from": entry.model_version,
+            # the frozen recipe includes the feature set: a v1 production model is retrained on v1 features
+            "features": (entry.feature_schema or {}).get("used_features"), "feature_version": entry.feature_version}
 
 
 # ------------------------------------------------------------------ final fit
-def _unique_version(session: Session, pitcher_id: int, family: str, tag: str) -> str:
-    v = registry.new_version(pitcher_id, family, FEATURE_VERSION, tag)
+def _unique_version(session: Session, pitcher_id: int, family: str, tag: str,
+                    feature_version: str = FEATURE_VERSION) -> str:
+    v = registry.new_version(pitcher_id, family, feature_version, tag)
     base, i = v, 2
     while session.get(ModelRegistry, v) is not None:
         v, i = f"{base}-{i}", i + 1
@@ -92,19 +97,22 @@ def final_fit(session: Session, pitcher_id: int, selection: dict, deployment_cut
               tag: str = "refit", df: pd.DataFrame | None = None, classes: list[str] | None = None) -> ModelRegistry:
     started_at = datetime.now(timezone.utc)
     family = selection["family"]
-    classes = classes or get_classes(session, pitcher_id)
-    df = df if df is not None else load_dated_frame(session, pitcher_id)
+    fversion = selection.get("feature_version") or FEATURE_VERSION
+    classes = classes or get_classes(session, pitcher_id, fversion)
+    df = df if df is not None else load_dated_frame(session, pitcher_id, fversion)
     deployment_cutoff = deployment_cutoff or today_utc()
     train = df[df.game_date < deployment_cutoff]
     if train.empty:
         raise ValueError("no labeled pitches before the deployment cutoff")
-    model = make_model(family, classes, selection["params"]).fit(train, train["label"])
+    # time-decay weights (recipe param decay_half_life_days) are aged from the deployment cutoff
+    model = decay.fit(make_model(family, classes, selection["params"], selection.get("features")), train,
+                      deployment_cutoff)
     applied = bool(selection.get("calibration_applied", True))
     if applied:  # the temperature comes from out-of-sample development predictions, never from `train`
         model.calibrator = TemperatureCalibrator()
         model.calibrator.T = float(selection["temperature"])
     cutoff = max(train.game_date)
-    version = _unique_version(session, pitcher_id, family, tag)
+    version = _unique_version(session, pitcher_id, family, tag, fversion)
     path, sha = registry.save_artifact(model, version)
     dev = selection["dev_metrics"]
     seasons = sorted({int(x) for x in train.game_season.unique()})
@@ -131,8 +139,9 @@ def final_fit(session: Session, pitcher_id: int, selection: dict, deployment_cut
     if selection.get("oos_fingerprint"):
         fp["development_oos"] = selection["oos_fingerprint"]
     entry = ModelRegistry(model_version=version, pitcher_id=pitcher_id, model_family=family,
-                          feature_version=FEATURE_VERSION,
-                          feature_schema={**schema_dict(classes), "used_features": model.features}, classes=classes,
+                          feature_version=fversion,
+                          feature_schema={**schema_dict(classes, fversion), "used_features": model.features},
+                          classes=classes,
                           config=cfg, dataset_fingerprint=fp, artifact_path=path, artifact_sha256=sha,
                           calibration=calib, validation_metrics=dict(dev), status="candidate",
                           created_at=datetime.now(timezone.utc))  # wall clock, not transaction start
@@ -251,6 +260,8 @@ def evaluate_recipe_on_dev(session: Session, entry: ModelRegistry, progress: Cal
     params = dict(base.params)
     if entry.model_family == "lightgbm":
         params["n_estimators"] = int(getattr(base, "best_iteration_", None) or params.get("n_estimators"))
+    if getattr(base, "decay_half_life_days", None) is not None:
+        params[decay.DECAY_KEY] = base.decay_half_life_days
     df = load_dated_frame(session, entry.pitcher_id, entry.feature_version)
     res = rolling_dev_evaluate(df, entry.classes, entry.model_family, grid=[params], features=base.features,
                                fixed_rounds=True, progress=progress)
@@ -260,16 +271,23 @@ def evaluate_recipe_on_dev(session: Session, entry: ModelRegistry, progress: Cal
 # ------------------------------------------------------------------ full refit
 def refit_all(session: Session, pitcher_id: int, families=FAMILY_ORDER, deployment_cutoff: date | None = None,
               grids: dict | None = None, block_games: int | None = None, promote: bool = True,
-              progress: Callable | None = None, tag: str = "refit") -> dict:
-    classes = get_classes(session, pitcher_id)
-    df = load_dated_frame(session, pitcher_id)
-    out = {"families": {}, "deployment_cutoff": str(deployment_cutoff or today_utc())}
+              progress: Callable | None = None, tag: str = "refit", decay_half_lives: tuple | None = None,
+              feature_version: str = FEATURE_VERSION) -> dict:
+    """`decay_half_lives`: when given, a second rolling-dev stage selects the time-decay half-life (None = no decay
+    is always a candidate) with each family's selected hyperparameters (ml/decay.py)."""
+    classes = get_classes(session, pitcher_id, feature_version)
+    df = load_dated_frame(session, pitcher_id, feature_version)
+    out = {"families": {}, "deployment_cutoff": str(deployment_cutoff or today_utc()),
+           "feature_version": feature_version}
     entries = {}
     for i, fam in enumerate(families):
         sub = (lambda f, m="", r=None, i=i: progress((i + f) / len(families), m, r)) if progress else None
         res = rolling_dev_evaluate(df, classes, fam, grid=(grids or {}).get(fam), block_games=block_games,
                                    progress=sub)
+        if decay_half_lives and fam != "majority":
+            res = decay.select_half_life(df, classes, fam, res, decay_half_lives, block_games=block_games)
         sel = selection_from_dev(res)
+        sel["feature_version"] = feature_version
         e = final_fit(session, pitcher_id, sel, deployment_cutoff, tag=tag, df=df, classes=classes)
         run = store_dev_run(session, e, res, recipe="selected on rolling development folds")
         entries[fam] = e
@@ -320,7 +338,7 @@ def retrain(session: Session, pitcher_id: int, policy: str, force: bool = False,
     prod = registry.promoted(session, pitcher_id)
     if prod is None:
         raise LookupError("No production model; run `pitchiq refit` first")
-    df = load_dated_frame(session, pitcher_id)
+    df = load_dated_frame(session, pitcher_id, prod.feature_version)
     games = game_table(df)
     cut = lifecycle.data_cutoff(session, prod)
     new = games[(games.game_date > cut) & (games.game_date < today)] if cut else games.iloc[0:0]
@@ -331,11 +349,13 @@ def retrain(session: Session, pitcher_id: int, policy: str, force: bool = False,
            "new_completed_starts": int(len(new)), "due": bool(due), "reason": why, "retrained": False}
     if not due:
         return rep
-    classes = get_classes(session, pitcher_id)
+    classes = get_classes(session, pitcher_id, prod.feature_version)
     res = None
     if reselect or lc is None:
-        res = rolling_dev_evaluate(df, classes, prod.model_family, progress=progress)
+        res = rolling_dev_evaluate(df, classes, prod.model_family, progress=progress,
+                                   features=(prod.feature_schema or {}).get("used_features"))
         sel = selection_from_dev(res)
+        sel["feature_version"] = prod.feature_version
     else:
         sel = selection_from_entry(session, prod)
     e = final_fit(session, pitcher_id, sel, today, scope="scheduled_retrain", policy=policy,
