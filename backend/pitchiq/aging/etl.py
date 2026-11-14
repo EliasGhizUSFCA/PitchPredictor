@@ -37,7 +37,7 @@ from ..models_aging import (AgingCohort, AgingEtlRun, AgingObservation, PitcherB
                             PitcherSeasonStats)
 from . import sources as src
 from .families import (FAMILY_GROUP, SHORT_SEASONS, age_completed_years, age_years, era_change, measurement_era,
-                       pitch_family, pitch_group, season_midpoint)
+                       pitch_family, pitch_group, scaled_threshold, season_midpoint)
 
 logger = logging.getLogger(__name__)
 Progress = Callable[[float, str, int], None]
@@ -469,7 +469,10 @@ def build_observations(units: pd.DataFrame, pss: pd.DataFrame, bios: dict, min_p
     pc = pss.set_index(["pitcher_id", "season"])
     workload = pd.to_numeric(pc["pitch_count"], errors="coerce")
     ipser = pd.to_numeric(pc["ip"], errors="coerce")
-    qual = workload >= min_season_pitches
+    # Qualification (at risk in t, survived into t+1, returned later) uses the season-length-scaled threshold, so a
+    # full-workload pitcher in the 60-game 2020 season (500 -> 185 pitches) is not counted as a dropout.
+    season_idx = pd.Series(pc.index.get_level_values("season"), index=pc.index)
+    qual = workload >= season_idx.map(lambda x: scaled_threshold(min_season_pitches, int(x)))
     qual_seasons: dict[int, list[int]] = {}
     for (pid, s), q in qual.items():
         if q:
@@ -478,6 +481,13 @@ def build_observations(units: pd.DataFrame, pss: pd.DataFrame, bios: dict, min_p
         v.sort()
 
     recs = {(int(r["pitcher_id"]), r["unit"], int(r["season"])): r for r in units.to_dict("records")}
+
+    def _codes(r):
+        return r["codes"] if r is not None and isinstance(r["codes"], list) else None
+
+    def _family_reclass(pid: int, fam: str, season: int) -> bool:
+        a, b = _codes(recs.get((pid, fam, season))), _codes(recs.get((pid, fam, season + 1)))
+        return bool(a and b and set(a) != set(b))
     rows = []
     now = datetime.now(timezone.utc)
     for (pid, unit, season), rec in recs.items():
@@ -485,20 +495,26 @@ def build_observations(units: pd.DataFrame, pss: pd.DataFrame, bios: dict, min_p
         if season >= last or (season + 1) not in covered or not bool(qual.get((pid, season), False)):
             continue
         n_from = rec["n"]
-        thr = min_season_pitches if unit == "ALL" else min_pitches
-        if _isnull(n_from) or n_from < thr:
+        base_thr = min_season_pitches if unit == "ALL" else min_pitches
+        if _isnull(n_from) or n_from < scaled_threshold(base_thr, season):
             continue
         nxt = recs.get((pid, unit, season + 1))
         n_to = None if nxt is None else _clean(nxt["n"])
         survived = bool(qual.get((pid, season + 1), False))
-        present_next = n_to is not None and n_to >= thr
+        present_next = n_to is not None and n_to >= scaled_threshold(base_thr, season + 1)
         later = [q for q in qual_seasons.get(pid, []) if q > season]
         nq = later[0] if later else None
         b = bios.get(pid)
         birth = b.birth_date if b else None
-        codes_from = rec["codes"] if isinstance(rec["codes"], list) else None
-        codes_to = (nxt["codes"] if isinstance(nxt["codes"], list) else None) if nxt is not None else None
-        reclass = bool(codes_from and codes_to and set(codes_from) != set(codes_to))
+        codes_from, codes_to = _codes(rec), _codes(nxt)
+        if unit == "ALL":
+            reclass = False
+        elif unit.startswith("group:"):
+            # a group is flagged only for code changes inside one of its families, not for arsenal changes
+            g = unit.split(":", 1)[1]
+            reclass = any(_family_reclass(pid, f, season) for f, gg in FAMILY_GROUP.items() if gg == g)
+        else:
+            reclass = bool(codes_from and codes_to and set(codes_from) != set(codes_to))
         common = dict(
             pitcher_id=pid, pitch_family=unit, season_from=season, season_to=season + 1,
             birth_year=birth.year if birth else None,
@@ -539,6 +555,10 @@ def _summ(x: pd.Series) -> dict:
 
 
 def build_cohorts(obs: pd.DataFrame, run_id: int | None) -> list[dict]:
+    """Age / birth-band cohorts. Pooled survival counts exclude short-season pairs (2019->2020, 2020->2021): opt-outs
+    and the 60-game schedule make those transitions incomparable; they are counted separately in
+    metric_summaries["short_season_pairs"] and remain in their own per-season scopes. `n_returned_later` looks ahead
+    to every season in `obs` (see pitchiq.aging.asof for an as-of-cutoff recomputation)."""
     if obs.empty:
         return []
     obs = obs.copy()
@@ -548,21 +568,31 @@ def build_cohorts(obs: pd.DataFrame, run_id: int | None) -> list[dict]:
     if base.empty:
         return []
     clean = obs[obs["both_qualified"] & ~obs["era_change"] & ~obs["short_season"]]
+    lookahead = int(obs["season_to"].max())
     now = datetime.now(timezone.utc)
     rows = []
     for ctype, col in (("age", "age_from_int"), ("birth_year_band", "birth_band")):
         b = base[base[col].notna()]
         cl = clean[clean[col].notna()]
         for scope_season in [None] + sorted(b["season_from"].unique().tolist()):
-            bs = b if scope_season is None else b[b["season_from"] == scope_season]
-            cs = cl if scope_season is None else cl[cl["season_from"] == scope_season]
-            for key, g in bs.groupby(col):
+            if scope_season is None:
+                short = b[b["short_season"].astype(bool)]
+                bs, cs = b[~b["short_season"].astype(bool)], cl
+            else:
+                short = b.iloc[0:0]
+                bs, cs = b[b["season_from"] == scope_season], cl[cl["season_from"] == scope_season]
+            for key in sorted(set(bs[col].tolist()) | set(short[col].tolist()), key=str):
+                g = bs[bs[col] == key]
+                gs = short[short[col] == key]
                 gk = cs[cs[col] == key]
                 summaries = {}
                 for unit, metric in COHORT_SUMMARY:
                     s = _summ(gk.loc[(gk["pitch_family"] == unit) & (gk["metric"] == metric), "delta"])
                     if s["n"]:
                         summaries[f"{unit}|{metric}"] = s
+                if not gs.empty:
+                    summaries["short_season_pairs"] = {"n": int(len(gs)), "survived": int(gs["survived"].sum()),
+                                                       "returned_later": int(gs["returned_later"].sum())}
                 n = int(len(g))
                 ns = int(g["survived"].sum())
                 rows.append(dict(
@@ -572,6 +602,9 @@ def build_cohorts(obs: pd.DataFrame, run_id: int | None) -> list[dict]:
                     n_era_change=int(g["era_change"].sum()), survival_rate=ns / n if n else None,
                     mean_age=_clean(g["age_from"].mean()),
                     metric_summaries={"deltas_exclude": "era-change (2019->2020) and 2020 pairs; both seasons qualified",
+                                      "survival_counts_exclude": ("short-season pairs (counted in short_season_pairs)"
+                                                                  if scope_season is None else None),
+                                      "returned_later_lookahead_through": lookahead,
                                       **summaries},
                     etl_run_id=run_id, computed_at=now))
     return rows
@@ -635,7 +668,12 @@ def career_validation(session: Session, pitcher_id: int) -> dict:
         FROM pitches p LEFT JOIN pitcher_season_stats s ON s.pitcher_id = p.pitcher_id AND s.season = p.season
         LEFT JOIN pitch_ages a ON a.pitch_uid = p.pitch_uid
         WHERE p.pitcher_id = :p GROUP BY p.season, s.pitch_count ORDER BY p.season"""), {"p": pitcher_id}).all()
-    return {str(r.season): {"pitch_rows": r.rows, "typed_pitches": r.typed, "savant_pitch_count": r.savant_pitch_count,
+    return {str(r.season): {"pitch_rows": r.rows, "typed_pitches": r.typed, "untyped_pitches": r.rows - r.typed,
+                            "savant_pitch_count": r.savant_pitch_count,
+                            "savant_matches_rows": None if r.savant_pitch_count is None else
+                            r.savant_pitch_count == r.rows,
+                            "savant_matches_typed": None if r.savant_pitch_count is None else
+                            r.savant_pitch_count == r.typed,
                             "age_range": None if r.age_min is None else [round(float(r.age_min), 3),
                                                                          round(float(r.age_max), 3)]}
             for r in rows}
@@ -679,9 +717,17 @@ def coverage_report(session: Session, min_pitches: int, min_season_pitches: int)
            for r in q("""SELECT pitch_family, count(*) n, count(DISTINCT (pitcher_id, season_from)) ps,
                                 count(*) FILTER (WHERE both_qualified) bq
                          FROM aging_observations GROUP BY 1 ORDER BY 1""")}
-    surv = q("""SELECT count(*) n, count(*) FILTER (WHERE survived) s, count(*) FILTER (WHERE returned_later) r,
+    surv_sql = """SELECT count(*) n, count(*) FILTER (WHERE survived) s, count(*) FILTER (WHERE returned_later) r,
                        count(*) FILTER (WHERE era_change) e, count(*) FILTER (WHERE short_season) ss
-                FROM aging_observations WHERE pitch_family='ALL' AND metric='pitch_count'""")[0]
+                FROM aging_observations WHERE pitch_family='ALL' AND metric='pitch_count'"""
+    surv = q(surv_sql)[0]
+    surv_ns = q(surv_sql + " AND NOT short_season")[0]
+    surv_by = {str(r.season_from): {"at_risk": r.n, "survived": r.s, "returned_later": r.r,
+                                    "survival_rate": round(r.s / r.n, 4) if r.n else None}
+               for r in q("""SELECT season_from, count(*) n, count(*) FILTER (WHERE survived) s,
+                                    count(*) FILTER (WHERE returned_later) r
+                             FROM aging_observations WHERE pitch_family='ALL' AND metric='pitch_count'
+                             GROUP BY 1 ORDER BY 1""")}
     reclass = q("""SELECT pitch_family, count(DISTINCT (pitcher_id, season_from)) n FROM aging_observations
                    WHERE reclass_flag GROUP BY 1 ORDER BY 2 DESC""")
     st_by_season = {str(r.season): r.n for r in q(
@@ -696,9 +742,16 @@ def coverage_report(session: Session, min_pitches: int, min_season_pitches: int)
                    "pitchers_missing_birth_date": missing_bio},
         "per_season": per_season, "qualified_pitch_type_rows_by_season_type": types,
         "sweeper_slurve_rows_by_season": st_by_season,
-        "observations": obs,
+        "observations_by_unit": obs,  # ("observations" is the total row count added by run_aging_etl)
         "survival": {"pitcher_seasons_at_risk": surv.n, "survived": surv.s, "dropped": surv.n - surv.s,
-                     "returned_later": surv.r, "era_change_pairs": surv.e, "short_season_pairs": surv.ss},
+                     "returned_later": surv.r, "era_change_pairs": surv.e, "short_season_pairs": surv.ss,
+                     "excluding_short_season_pairs": {"pitcher_seasons_at_risk": surv_ns.n, "survived": surv_ns.s,
+                                                      "dropped": surv_ns.n - surv_ns.s, "returned_later": surv_ns.r},
+                     "by_season_from": surv_by,
+                     "qualifying_threshold_by_season": {str(x): scaled_threshold(min_season_pitches, int(x))
+                                                        for x in sorted({int(k) for k in per_season})},
+                     "returned_later_note": "returned_later / next_qualifying_season look ahead to the last loaded "
+                                            "season; use pitchiq.aging.asof for as-of-cutoff values"},
         "reclass_flagged_pitcher_seasons_by_unit": {r.pitch_family: r.n for r in reclass},
     }
 

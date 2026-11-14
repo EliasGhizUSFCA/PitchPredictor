@@ -6,6 +6,9 @@ classification changes, most importantly the sweeper (ST) and slurve (SV) codes 
 data ST pitcher-season rows grow from 7 (2015) to 118 (2021), 176 (2022) and 286 (2023), while many pitchers' sliders
 move from SL to SL+ST or ST across seasons. Family-level deltas (SL/ST/SV -> "slider") are therefore comparable across
 seasons; per-code deltas are not, and aging_observations.reclass_flag marks pairs whose codes inside a family changed.
+For a group unit (group:fastball / group:breaking / group:offspeed) reclass_flag is true only when one of its member
+families changed codes; a plain arsenal change (adding or dropping a cutter, sinker, ...) is not a reclassification and
+is visible as codes_from != codes_to.
 `pitch_group` follows Baseball Savant's fastball / breaking / offspeed grouping and also absorbs four-seam <-> sinker
 relabelling (both are "fastball").
 
@@ -41,6 +44,18 @@ LEADERBOARD_CODE: dict[str, str] = {"KC": "CU", "CS": "CU", "FA": "FF", "FT": "S
 
 TRACKMAN_LAST_SEASON = 2019  # Statcast used TrackMan radar 2015-2019; Hawk-Eye optical tracking from 2020.
 SHORT_SEASONS = {2020}  # 60-game season
+FULL_SEASON_GAMES = 162
+SEASON_GAMES: dict[int, int] = {2020: 60}  # scheduled team games where different from 162
+
+
+def season_games(season: int) -> int:
+    return SEASON_GAMES.get(int(season), FULL_SEASON_GAMES)
+
+
+def scaled_threshold(base: int, season: int) -> int:
+    """Workload threshold scaled to the season's length (500 pitches -> 185 in the 60-game 2020 season), so that
+    qualification / survival in 2020 means the same share of a season as in a full season."""
+    return int(round(base * season_games(season) / FULL_SEASON_GAMES))
 
 
 def pitch_family(code: str | None) -> str:

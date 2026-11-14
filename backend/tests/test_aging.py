@@ -204,11 +204,79 @@ def test_cohorts_count_every_at_risk_pitcher_season(aged):
     at_risk = s.scalars(select(O).where(O.pitch_family == "ALL", O.metric == "pitch_count")).all()
     pooled = s.scalars(select(AgingCohort).where(AgingCohort.cohort_type == "age",
                                                  AgingCohort.scope == "pooled")).all()
-    assert sum(c.n_pitchers for c in pooled) == sum(1 for o in at_risk if o.age_from_int is not None)
-    assert sum(c.n_dropped for c in pooled) == sum(1 for o in at_risk if not o.survived and o.age_from_int is not None)
+    # pooled survival counts exclude short-season pairs (2019->2020), which are counted separately
+    full = [o for o in at_risk if o.age_from_int is not None and not o.short_season]
+    short = [o for o in at_risk if o.age_from_int is not None and o.short_season]
+    assert full and short
+    assert sum(c.n_pitchers for c in pooled) == len(full)
+    assert sum(c.n_dropped for c in pooled) == sum(1 for o in full if not o.survived)
+    assert sum(c.metric_summaries.get("short_season_pairs", {}).get("n", 0) for c in pooled) == len(short)
+    assert sum(c.n_era_change for c in pooled) == 0
     for c in pooled:
         assert c.n_survived + c.n_dropped == c.n_pitchers
-        assert c.survival_rate == pytest.approx(c.n_survived / c.n_pitchers)
+        if c.n_pitchers:
+            assert c.survival_rate == pytest.approx(c.n_survived / c.n_pitchers)
+    # per-season scope 2019 keeps its (short-season, era-change) pairs
+    s19 = s.scalars(select(AgingCohort).where(AgingCohort.cohort_type == "age", AgingCohort.scope == "2019")).all()
+    assert sum(c.n_pitchers for c in s19) == sum(1 for o in short if o.season_from == 2019)
+
+
+def test_short_season_survival_uses_scaled_threshold(aged):
+    from pitchiq.models_aging import AgingObservation as O, PitcherSeasonStats as PSS
+    s = aged["session"]
+    assert fam.scaled_threshold(500, 2020) == 185 and fam.scaled_threshold(500, 2019) == 500
+    pc20 = {r.pitcher_id: r.pitch_count for r in s.scalars(select(PSS).where(PSS.season == 2020)).all()}
+    pairs = s.scalars(select(O).where(O.season_from == 2019, O.pitch_family == "ALL", O.metric == "pitch_count")).all()
+    assert pairs
+    for o in pairs:
+        assert o.survived == (pc20.get(o.pitcher_id) is not None and pc20[o.pitcher_id] >= 185)
+    # with a 2000-pitch threshold (741 in 2020): Scherzer (2,770 -> 1,213 in 2020) survives although 1,213 < 2,000;
+    # Flaherty (3,179 -> 719) does not
+    from pitchiq.aging.etl import rebuild_observations
+    rebuild_observations(s, 100, 2000, None)
+    s.expire_all()
+    got = {o.pitcher_id: o.survived for o in s.scalars(select(O).where(
+        O.season_from == 2019, O.pitch_family == "ALL", O.metric == "pitch_count")).all()}
+    assert got == {453286: True, 656427: False, PID: False}
+
+
+def test_reclass_flag_only_for_code_changes_inside_a_family(aged):
+    from pitchiq.models_aging import AgingObservation as O
+    s = aged["session"]
+    rows = s.scalars(select(O).where(O.metric.in_(["avg_speed_mph", "pitch_count"]))).all()
+    fam_flag = {(o.pitcher_id, o.season_from, o.pitch_family): o.reclass_flag for o in rows
+                if not o.pitch_family.startswith("group:") and o.pitch_family != "ALL"}
+    groups = [o for o in rows if o.pitch_family.startswith("group:")]
+    assert groups
+    for o in groups:
+        g = o.pitch_family.split(":", 1)[1]
+        expect = any(v for (pid, sf, f), v in fam_flag.items()
+                     if pid == o.pitcher_id and sf == o.season_from and fam.FAMILY_GROUP.get(f) == g)
+        assert o.reclass_flag == expect
+    # arsenal-only changes in group:fastball (e.g. adding a cutter) are not flagged
+    assert any(o.pitch_family == "group:fastball" and o.codes_from and o.codes_to
+               and set(o.codes_from) != set(o.codes_to) and not o.reclass_flag for o in groups)
+    assert not any(o.reclass_flag for o in rows if o.pitch_family == "ALL")
+
+
+def test_as_of_cutoff_removes_look_ahead(aged):
+    from pitchiq.aging.asof import apply_cutoff, cohorts_as_of, load_observations_as_of
+    s = aged["session"]
+    full = pd.read_sql(text("SELECT * FROM aging_observations WHERE pitch_family='ALL' AND metric='pitch_count'"),
+                       s.connection())
+    # the stored columns look ahead: 2019 non-survivors who qualified again in 2022/2023
+    ahead = full[(full.season_to <= 2020) & full.returned_later.astype(bool)]
+    assert len(ahead) and (ahead.next_qualifying_season > 2020).all()
+    v = load_observations_as_of(s, 2020, "ALL", "pitch_count")
+    assert len(v) and (v.season_to <= 2020).all()
+    assert v.next_qualifying_season.dropna().le(2020).all() and not v.returned_later.any()
+    assert v.loc[v.pitcher_id.isin(ahead.pitcher_id), "outcome_censored"].all()
+    assert apply_cutoff(full, 2023).returned_later.sum() == full.returned_later.sum()
+    rows = cohorts_as_of(s, 2020)
+    assert rows and all(r["n_returned_later"] == 0 for r in rows)
+    assert all(r["metric_summaries"]["returned_later_lookahead_through"] <= 2020 for r in rows)
+    pooled = [r for r in rows if r["cohort_type"] == "age" and r["scope"] == "pooled"]
+    assert sum(r["n_pitchers"] for r in pooled) == 0  # only short-season pairs exist by 2020 in the fixtures
 
 
 def test_rebuild_is_idempotent(aged):
@@ -300,3 +368,6 @@ def test_job_kind_and_api(api):
     assert r.status_code == 200
     assert all(x["role"] == "modeling" for x in r.json()["seasons"])  # committed test DB has no history-only rows
     assert api.get("/api/aging/pitchers/1").status_code == 404
+    assert api.get("/api/aging/cohorts?as_of=2022").status_code == 200
+    r = api.get("/api/aging/observations?as_of=2022&metric=pitch_count")
+    assert r.status_code == 200 and isinstance(r.json(), list)

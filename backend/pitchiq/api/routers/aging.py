@@ -79,7 +79,13 @@ def career_pitches(pid: int, db: Session = Depends(get_db)):
 
 
 @router.get("/cohorts")
-def cohorts(cohort_type: str = "age", scope: str = "pooled", db: Session = Depends(get_db)):
+def cohorts(cohort_type: str = "age", scope: str = "pooled", as_of: int | None = None,
+            db: Session = Depends(get_db)):
+    if as_of is not None:  # recomputed from seasons <= as_of only (no look-ahead in returned_later)
+        from ...aging.asof import cohorts_as_of
+        rows = [r for r in cohorts_as_of(db, as_of) if r["cohort_type"] == cohort_type and r["scope"] == scope]
+        return [{k: (str(v) if hasattr(v, "isoformat") else v) for k, v in r.items()}
+                for r in sorted(rows, key=lambda r: r["cohort_key"])]
     rows = db.scalars(select(AgingCohort).where(AgingCohort.cohort_type == cohort_type, AgingCohort.scope == scope)
                       .order_by(AgingCohort.cohort_key)).all()
     return [_row(r) for r in rows]
@@ -87,7 +93,18 @@ def cohorts(cohort_type: str = "age", scope: str = "pooled", db: Session = Depen
 
 @router.get("/observations")
 def observations(pitch_family: str = "ALL", metric: str = "fastball_avg_speed_mph", pitcher_id: int | None = None,
-                 both_qualified: bool | None = None, limit: int = Query(1000, le=20000), db: Session = Depends(get_db)):
+                 both_qualified: bool | None = None, limit: int = Query(1000, le=20000), as_of: int | None = None,
+                 db: Session = Depends(get_db)):
+    if as_of is not None:  # pairs with season_to <= as_of; returned_later / next_qualifying_season as of the cutoff
+        import json
+
+        from ...aging.asof import load_observations_as_of
+        df = load_observations_as_of(db, as_of, pitch_family, metric)
+        if pitcher_id is not None:
+            df = df[df["pitcher_id"] == pitcher_id]
+        if both_qualified is not None:
+            df = df[df["both_qualified"] == both_qualified]
+        return json.loads(df.head(limit).to_json(orient="records", date_format="iso"))
     q = select(AgingObservation).where(AgingObservation.pitch_family == pitch_family,
                                        AgingObservation.metric == metric)
     if pitcher_id is not None:
