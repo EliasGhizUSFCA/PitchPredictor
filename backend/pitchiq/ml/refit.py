@@ -328,10 +328,16 @@ def after_ingest(session: Session, pitcher_id: int, policy: str | None = None) -
     from .prospective import record_prospective
     out = {"prospective_ledger": record_prospective(session, pitcher_id)}
     policy = get_settings().auto_retrain_policy if policy is None else policy
+    prod = registry.promoted(session, pitcher_id)
     if not policy or policy == "manual":
         out["retrain"] = {"skipped": "automatic retraining disabled (policy manual)"}
-    elif registry.promoted(session, pitcher_id) is None:
+    elif prod is None:
         out["retrain"] = {"skipped": "no production model"}
+    elif lifecycle.lifecycle_row(session, prod.model_version) is None:
+        # a season-split production model has no frozen rolling-development recipe; re-selection is a deliberate
+        # operator action (`pitchiq refit` / job refit_next_pitch), never an implicit side effect of ingestion
+        out["retrain"] = {"skipped": f"production {prod.model_version} is a season-split model without a lifecycle "
+                                     "recipe; run `pitchiq refit` first"}
     else:
         out["retrain"] = retrain(session, pitcher_id, policy)
     return out

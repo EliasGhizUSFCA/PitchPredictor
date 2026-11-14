@@ -167,7 +167,9 @@ def rolling_folds(df: pd.DataFrame, classes: list[str], eval_seasons: list[int] 
         eval_idx = np.where(df["game_pk"].isin(blk.game_pk).to_numpy())[0]
         f = Fold(b, blk.game_pk.tolist(), start, end, train_idx, eval_idx)
         seen = set(df["label"].iloc[train_idx])
-        if len(train_idx) == 0 or not set(classes) - {"OTHER"} <= seen:
+        # every class must be present: LightGBM only emits columns for classes it saw, and a fold whose model
+        # cannot represent a class would be scored on an incomparable output space
+        if len(train_idx) == 0 or not set(classes) <= seen:
             f.skipped = "training window does not contain every pitch class yet"
         folds.append(f)
     if not any(f.skipped is None for f in folds):

@@ -141,10 +141,35 @@ def test_temperature_fit_on_out_of_sample_dev_predictions_not_in_sample(world):
     e = s.get(ModelRegistry, world["out"]["families"]["logreg"]["model_version"])
     df = protocol.load_dated_frame(s, PID)
     res = protocol.rolling_dev_evaluate(df, e.classes, "logreg", grid=[{"C": 0.1}])
-    assert e.calibration["temperature"] == pytest.approx(res.temperature)
+    assert e.calibration["pooled_temperature"] == pytest.approx(res.temperature)
     assert e.calibration["val_log_loss_before"] == pytest.approx(log_loss(res.P_raw, res.y))
+    assert e.calibration["chrono_calibrated_oos_log_loss"] == pytest.approx(log_loss(res.P_cal, res.y))
+    # predetermined rule: the temperature is deployed only if chronological calibration helped on development folds
+    applied = log_loss(res.P_cal, res.y) < log_loss(res.P_raw, res.y)
+    assert e.calibration["applied"] is applied and res.calibration_applied is applied
     m = registry.load_model(e)
-    assert m.calibrator.T == pytest.approx(res.temperature)
+    if applied:
+        assert m.calibrator.T == pytest.approx(res.temperature) and e.calibration["temperature"] == m.calibrator.T
+    else:
+        assert m.calibrator is None and e.calibration["temperature"] == 1.0
+    assert e.validation_metrics["log_loss"] == pytest.approx(log_loss(res.P_deployed, res.y))
+
+
+def test_calibration_rule_deploys_raw_outputs_when_chronological_calibration_hurts():
+    rng = np.random.default_rng(3)
+    y = rng.integers(0, 3, 200)
+    P = rng.dirichlet(np.ones(3), 200)
+    base = dict(family="logreg", params={}, grid_results=[], folds=[], y=y, eval_frame=pd.DataFrame(),
+                fold_temperatures=[1.0], temperature=0.7, ece_cal=0.1, ece_raw=0.2, seconds=0.0)
+    sm = {"brier": 0.6, "top1_accuracy": 0.4}
+    hurt = protocol.DevResult(P_raw=P, P_cal=P, summary_raw=dict(log_loss=1.0, **sm), summary_cal=dict(log_loss=1.01, **sm),
+                              **base)
+    assert not hurt.calibration_applied and hurt.deployed_temperature == 1.0 and hurt.P_deployed is hurt.P_raw
+    assert hurt.dev_metrics()["log_loss"] == 1.0 and hurt.dev_metrics()["ece"] == 0.2
+    helped = protocol.DevResult(P_raw=P, P_cal=P, summary_raw=dict(log_loss=1.0, **sm), summary_cal=dict(log_loss=0.99, **sm),
+                                **base)
+    assert helped.calibration_applied and helped.deployed_temperature == 0.7
+    assert helped.dev_metrics()["log_loss"] == 0.99 and helped.dev_metrics()["ece"] == 0.1
 
 
 def test_lifecycle_models_are_mirrored_with_cutoff_tags(world, tracker):
@@ -251,7 +276,10 @@ def test_policy_due_rules():
     assert refit.policy_due("every_6_starts", g(6), now, date(2027, 5, 2), False)[0]
     assert not refit.policy_due("weekly", g(2), now, date(2027, 5, 7), False)[0]
     assert refit.policy_due("weekly", g(1), now, date(2027, 5, 8), False)[0]
-    assert refit.policy_due("manual", g(0), now, date(2027, 5, 2), False)[0]
+    # manual: the operator running the job is the trigger, but a refit on unchanged data is a no-op unless forced
+    assert refit.policy_due("manual", g(1), now, date(2027, 5, 2), False)[0]
+    assert not refit.policy_due("manual", g(0), now, date(2027, 5, 2), False)[0]
+    assert refit.policy_due("manual", g(0), now, date(2027, 5, 2), True)[0]
     assert refit.policy_due("every_6_starts", g(0), now, date(2027, 5, 2), True)[0]
     with pytest.raises(ValueError):
         refit.policy_due("hourly", g(1), now, date(2027, 5, 2), False)
@@ -282,6 +310,23 @@ def test_retrain_job_refits_frozen_recipe_when_due(world, mp):
     assert early.status == "previous_production"
     from pitchiq.jobs.tasks import DESCRIPTIONS, TASKS
     assert "retrain_next_pitch" in TASKS and "retrain_next_pitch" in DESCRIPTIONS
+
+
+def test_after_ingest_runs_ledger_then_policy_check(world, mp):
+    s = world["s"]
+    prod = registry.promoted(s, PID)  # the scheduled retrain above: data through the last fixture game
+    assert lifecycle.lifecycle_row(s, prod.model_version) is not None
+    rep = refit.after_ingest(s, PID, "after_each_start")
+    assert "prospective_ledger" in rep and rep["retrain"]["due"] is False and not rep["retrain"]["retrained"]
+    assert rep["retrain"]["new_completed_starts"] == 0
+    assert "disabled" in refit.after_ingest(s, PID, "manual")["retrain"]["skipped"]
+    n_models = s.scalar(select(__import__("sqlalchemy").func.count()).select_from(ModelRegistry))
+    legacy = s.get(ModelRegistry, world["legacy"])
+    with pytest.MonkeyPatch.context() as m:  # season-split production: never an implicit re-selection
+        m.setattr(registry, "promoted", lambda session, pid: legacy)
+        assert "season-split" in refit.after_ingest(s, PID, "after_each_start")["retrain"]["skipped"]
+    assert s.scalar(select(__import__("sqlalchemy").func.count()).select_from(ModelRegistry)) == n_models
+    assert registry.promoted(s, PID).model_version == prod.model_version
 
 
 # ------------------------------------------------------------------ replay
